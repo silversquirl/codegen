@@ -4,7 +4,7 @@ const util = @import("util");
 pub const liveness = @import("ssa/liveness.zig");
 
 pub const Instruction = union(enum) {
-    phi: Binary,
+    phi: Phi,
 
     i_const: u64,
 
@@ -21,6 +21,31 @@ pub const Instruction = union(enum) {
     ge: Binary,
 
     call: *const Call,
+
+    pub const Phi = struct {
+        values: [*:.invalid]const Ref,
+
+        pub fn init(values: [:.invalid]const Ref) Phi {
+            return .{ .values = values.ptr };
+        }
+
+        pub fn format(phi: Phi, _: []const u8, _: std.fmt.FormatOptions, w: anytype) !void {
+            var i: usize = 0;
+            while (phi.values[i] != .invalid) : (i += 1) {
+                if (i > 0) {
+                    try w.writeAll(", ");
+                }
+                try w.print("{}", .{phi.values[i]});
+            }
+        }
+
+        fn clone(phi: Phi, allocator: std.mem.Allocator) !Phi {
+            const old_values = std.mem.span(phi.values);
+            const values = try allocator.allocSentinel(Ref, old_values.len, .invalid);
+            @memcpy(values, old_values);
+            return .{ .values = values };
+        }
+    };
 
     pub const Binary = struct {
         lhs: Ref,
@@ -218,7 +243,11 @@ pub const Builder = struct {
 
             const arena = b.b.arena.allocator();
             const copy: Instruction = switch (insn) {
-                .call => |data| .{ .call = try data.clone(arena) },
+                inline .phi, .call => |data, name| @unionInit(
+                    Instruction,
+                    @tagName(name),
+                    try data.clone(arena),
+                ),
 
                 // No allocated data
                 else => insn,
@@ -316,10 +345,10 @@ test "builder" {
     } });
     try blk1.finish(.{ .jump = blk2.ref });
 
-    const phi = try blk2.i(.u32, .{ .phi = .{
-        .lhs = sum,
-        .rhs = call,
-    } });
+    const phi = try blk2.i(.u32, .{ .phi = Instruction.Phi.init(&.{
+        sum,
+        call,
+    }) });
     try blk2.finish(.{ .ret = phi });
 
     const func = try b.finish();

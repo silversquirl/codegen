@@ -33,6 +33,13 @@ const Analyzer = struct {
         for (blk.insns(ana.func.insns), @intFromEnum(blk.start)..) |insn, insn_idx| {
             const ref: ssa.Instruction.Ref = @enumFromInt(insn_idx);
             switch (insn) {
+                .phi => |phi| {
+                    var i: usize = 0;
+                    while (phi.values[i] != .invalid) : (i += 1) {
+                        ana.updateRef(phi.values[i], ref);
+                    }
+                },
+
                 .i_const => {},
 
                 .call => |call| for (call.args) |arg| {
