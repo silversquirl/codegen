@@ -47,6 +47,7 @@ const Analyzer = struct {
                 },
 
                 inline else => |value, name| switch (@TypeOf(value)) {
+                    ssa.Instruction.Ref => ana.updateRef(value, ref),
                     ssa.Instruction.Binary => {
                         ana.updateRef(value.lhs, ref);
                         ana.updateRef(value.rhs, ref);
@@ -134,16 +135,12 @@ test "convoluted" {
         .lhs = loop_value.ref,
         .rhs = c_1,
     } });
-    try loop_value.add(next_loop_value);
-    try loop_value.finish();
 
     const c_5 = try blk3.i(.u32, .{ .i_const = 5 });
     const next_mul_value = try blk3.i(.u32, .{ .mul = .{
         .lhs = mul_value.ref,
         .rhs = c_5,
     } });
-    try mul_value.add(next_mul_value);
-    try mul_value.finish();
 
     const c_10 = try blk3.i(.u32, .{ .i_const = 10 });
     const loop_check = try blk3.i(.bool, .{ .lt = .{
@@ -164,6 +161,12 @@ test "convoluted" {
         .lhs = next_mul_value,
         .rhs = c_500,
     } });
+
+    try loop_value.add(try blk4.i(.u32, .{ .copy = next_loop_value }));
+    try loop_value.finish();
+
+    try mul_value.add(try blk4.i(.u32, .{ .copy = next_mul_value }));
+    try mul_value.finish();
 
     var blk6 = try b.block();
     try blk4.finish(.{ .branch = .{
@@ -205,8 +208,8 @@ test "convoluted" {
         \\  %9: u32 = i_const 0
         \\  jump @3
         \\@3:
-        \\  %10: u32 = phi %8, %13
-        \\  %11: u32 = phi %9, %15
+        \\  %10: u32 = phi %8, %20
+        \\  %11: u32 = phi %9, %21
         \\  %12: u32 = i_const 1
         \\  %13: u32 = add %10, %12
         \\  %14: u32 = i_const 5
@@ -217,12 +220,14 @@ test "convoluted" {
         \\@4:
         \\  %18: u32 = i_const 500
         \\  %19: bool = lt %15, %18
+        \\  %20: u32 = copy %13
+        \\  %21: u32 = copy %15
         \\  branch %19, @3, @6
         \\@5:
-        \\  %21: u32 = phi %15, %20
-        \\  ret %21
+        \\  %23: u32 = phi %15, %22
+        \\  ret %23
         \\@6:
-        \\  %20: u32 = div %15, %14
+        \\  %22: u32 = div %15, %14
         \\  jump @5
         \\
     , "{}", .{func});

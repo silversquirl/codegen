@@ -5,6 +5,7 @@ pub const liveness = @import("ssa/liveness.zig");
 
 pub const Instruction = union(enum) {
     phi: Phi,
+    copy: Ref,
 
     i_const: u64,
 

@@ -70,7 +70,8 @@ const Compiler = struct {
             const offset = start_offset + count;
             const insn_ref: ssa.Instruction.Ref = @enumFromInt(insn_idx);
             switch (insn) {
-                .phi => {},
+                .phi => {}, // TODO
+                .copy => {}, // TODO
 
                 .i_const => |value| {
                     // TODO: immediates
