@@ -25,10 +25,6 @@ pub const Instruction = union(enum) {
     pub const Phi = struct {
         values: [*:.invalid]const Ref,
 
-        pub fn init(values: [:.invalid]const Ref) Phi {
-            return .{ .values = values.ptr };
-        }
-
         pub fn format(phi: Phi, _: []const u8, _: std.fmt.FormatOptions, w: anytype) !void {
             var i: usize = 0;
             while (phi.values[i] != .invalid) : (i += 1) {
@@ -205,6 +201,7 @@ pub const Builder = struct {
     types: util.IndexedStore(Type, Instruction.Ref).Mutable = .{},
     blocks: util.IndexedStore(Block, Block.Ref).Mutable = .{},
     current_block: Block.Ref = .invalid, // Used to ensure blocks are constructed one at a time
+    unfinished_phis: usize = 0,
 
     pub fn init(allocator: std.mem.Allocator) Builder {
         return .{ .arena = std.heap.ArenaAllocator.init(allocator) };
@@ -223,6 +220,7 @@ pub const Builder = struct {
 
     pub fn finish(b: *Builder) !Function {
         std.debug.assert(b.current_block == .invalid); // Check for unfinished blocks
+        std.debug.assert(b.unfinished_phis == 0); // Check for unfinished phis
         const allocator = b.arena.child_allocator;
         const func = Function{
             .arena = b.arena.state,
@@ -260,6 +258,18 @@ pub const Builder = struct {
             return insn_ref;
         }
 
+        pub fn phi(b: *BlockBuilder, ty: Type) !PhiBuilder {
+            b.checkOrInitCurrentBlock();
+
+            const ty_ref = try b.b.types.append(b.b.arena.child_allocator, ty);
+            errdefer b.b.types.popLast();
+            const insn_ref = try b.b.insns.appendUndefined(b.b.arena.child_allocator);
+            std.debug.assert(ty_ref == insn_ref);
+
+            b.b.unfinished_phis += 1;
+            return .{ .b = b.b, .ref = insn_ref };
+        }
+
         pub fn finish(b: *BlockBuilder, terminal: Block.Terminal) !void {
             b.checkOrInitCurrentBlock();
 
@@ -277,6 +287,32 @@ pub const Builder = struct {
             } else {
                 std.debug.assert(b.b.current_block == b.ref); // Ensure blocks are constructed one at a time
             }
+        }
+    };
+
+    pub const PhiBuilder = struct {
+        b: *Builder,
+        ref: Instruction.Ref,
+        values: std.ArrayListUnmanaged(Instruction.Ref) = .{},
+        finished: bool = false,
+
+        pub fn deinit(b: *PhiBuilder) void {
+            const allocator = b.b.arena.child_allocator;
+            b.values.deinit(allocator);
+        }
+
+        pub fn add(b: *PhiBuilder, value: Instruction.Ref) !void {
+            std.debug.assert(!b.finished);
+            try b.values.append(b.b.arena.child_allocator, value);
+        }
+
+        pub fn finish(b: *PhiBuilder) !void {
+            const values = try b.b.arena.allocator().allocSentinel(Instruction.Ref, b.values.items.len, .invalid);
+            @memcpy(values, b.values.items);
+            b.b.insns.getPtr(b.ref).* = .{ .phi = .{ .values = values } };
+
+            b.finished = true;
+            b.b.unfinished_phis -= 1;
         }
     };
 };
@@ -345,11 +381,14 @@ test "builder" {
     } });
     try blk1.finish(.{ .jump = blk2.ref });
 
-    const phi = try blk2.i(.u32, .{ .phi = Instruction.Phi.init(&.{
-        sum,
-        call,
-    }) });
-    try blk2.finish(.{ .ret = phi });
+    var phi = try blk2.phi(.u32);
+    {
+        defer phi.deinit();
+        try phi.add(sum);
+        try phi.add(call);
+        try phi.finish();
+    }
+    try blk2.finish(.{ .ret = phi.ref });
 
     const func = try b.finish();
     defer func.deinit(std.testing.allocator);

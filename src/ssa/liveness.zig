@@ -72,3 +72,160 @@ const Analyzer = struct {
         }
     }
 };
+
+test "convoluted" {
+    var b = ssa.Builder.init(std.testing.allocator);
+    defer b.deinit();
+
+    var blk0 = try b.block();
+    const c_7 = try blk0.i(.u32, .{ .i_const = 7 });
+    const c_13 = try blk0.i(.u32, .{ .i_const = 13 });
+    const sum = try blk0.i(.u32, .{ .add = .{
+        .lhs = c_7,
+        .rhs = c_13,
+    } });
+    const c_20 = try blk0.i(.u32, .{ .i_const = 20 });
+    const cond = try blk0.i(.bool, .{ .lt = .{
+        .lhs = sum,
+        .rhs = c_20,
+    } });
+
+    var blk1 = try b.block();
+    var blk2 = try b.block();
+    try blk0.finish(.{ .branch = .{
+        .cond = cond,
+        .true = blk1.ref,
+        .false = blk2.ref,
+    } });
+
+    const call = try blk1.i(.u32, .{ .call = &.{
+        .name = "add2",
+        .args = &.{sum},
+    } });
+    try blk1.finish(.{ .jump = blk2.ref });
+
+    var phi = try blk2.phi(.u32);
+    {
+        defer phi.deinit();
+        try phi.add(sum);
+        try phi.add(call);
+        try phi.finish();
+    }
+    const c_3 = try blk2.i(.u32, .{ .i_const = 3 });
+    const add3 = try blk2.i(.u32, .{ .add = .{
+        .lhs = phi.ref,
+        .rhs = c_3,
+    } });
+    const c_0 = try blk2.i(.u32, .{ .i_const = 0 });
+
+    var blk3 = try b.block();
+    try blk2.finish(.{ .jump = blk3.ref });
+
+    var loop_value = try blk3.phi(.u32);
+    defer loop_value.deinit();
+    try loop_value.add(add3);
+
+    var mul_value = try blk3.phi(.u32);
+    defer mul_value.deinit();
+    try mul_value.add(c_0);
+
+    const c_1 = try blk3.i(.u32, .{ .i_const = 1 });
+    const next_loop_value = try blk3.i(.u32, .{ .add = .{
+        .lhs = loop_value.ref,
+        .rhs = c_1,
+    } });
+    try loop_value.add(next_loop_value);
+    try loop_value.finish();
+
+    const c_5 = try blk3.i(.u32, .{ .i_const = 5 });
+    const next_mul_value = try blk3.i(.u32, .{ .mul = .{
+        .lhs = mul_value.ref,
+        .rhs = c_5,
+    } });
+    try mul_value.add(next_mul_value);
+    try mul_value.finish();
+
+    const c_10 = try blk3.i(.u32, .{ .i_const = 10 });
+    const loop_check = try blk3.i(.bool, .{ .lt = .{
+        .lhs = next_loop_value,
+        .rhs = c_10,
+    } });
+
+    var blk4 = try b.block();
+    var blk5 = try b.block();
+    try blk3.finish(.{ .branch = .{
+        .cond = loop_check,
+        .true = blk4.ref,
+        .false = blk5.ref,
+    } });
+
+    const c_500 = try blk4.i(.u32, .{ .i_const = 500 });
+    const mul_check = try blk4.i(.bool, .{ .lt = .{
+        .lhs = next_mul_value,
+        .rhs = c_500,
+    } });
+
+    var blk6 = try b.block();
+    try blk4.finish(.{ .branch = .{
+        .cond = mul_check,
+        .true = blk3.ref,
+        .false = blk6.ref,
+    } });
+
+    const adjusted_mul_value = try blk6.i(.u32, .{ .div = .{
+        .lhs = next_mul_value,
+        .rhs = c_5,
+    } });
+    try blk6.finish(.{ .jump = blk5.ref });
+
+    var final_mul_value = try blk5.phi(.u32);
+    defer final_mul_value.deinit();
+    try final_mul_value.add(next_mul_value);
+    try final_mul_value.add(adjusted_mul_value);
+    try final_mul_value.finish();
+    try blk5.finish(.{ .ret = final_mul_value.ref });
+
+    const func = try b.finish();
+    defer func.deinit(std.testing.allocator);
+    try std.testing.expectFmt(
+        \\@0:
+        \\  %0: u32 = i_const 7
+        \\  %1: u32 = i_const 13
+        \\  %2: u32 = add %0, %1
+        \\  %3: u32 = i_const 20
+        \\  %4: bool = lt %2, %3
+        \\  branch %4, @1, @2
+        \\@1:
+        \\  %5: u32 = call add2(%2)
+        \\  jump @2
+        \\@2:
+        \\  %6: u32 = phi %2, %5
+        \\  %7: u32 = i_const 3
+        \\  %8: u32 = add %6, %7
+        \\  %9: u32 = i_const 0
+        \\  jump @3
+        \\@3:
+        \\  %10: u32 = phi %8, %13
+        \\  %11: u32 = phi %9, %15
+        \\  %12: u32 = i_const 1
+        \\  %13: u32 = add %10, %12
+        \\  %14: u32 = i_const 5
+        \\  %15: u32 = mul %11, %14
+        \\  %16: u32 = i_const 10
+        \\  %17: bool = lt %13, %16
+        \\  branch %17, @4, @5
+        \\@4:
+        \\  %18: u32 = i_const 500
+        \\  %19: bool = lt %15, %18
+        \\  branch %19, @3, @6
+        \\@5:
+        \\  %21: u32 = phi %15, %20
+        \\  ret %21
+        \\@6:
+        \\  %20: u32 = div %15, %14
+        \\  jump @5
+        \\
+    , "{}", .{func});
+
+    // TODO: check liveness data
+}
