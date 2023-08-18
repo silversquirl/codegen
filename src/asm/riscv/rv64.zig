@@ -316,3 +316,13 @@ test "slli" {
         } }),
     );
 }
+
+test "addi as li" {
+    // ADDI becomes the pseudo-instruction LI when rs1 is x0
+    try std.testing.expectEqual(
+        @as(u32, 0x0ff0_0f93),
+        try assembleInstruction(.{ .addi = .{
+            .x31, .x0, 0xff,
+        } }),
+    );
+}

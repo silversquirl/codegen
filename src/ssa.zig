@@ -1,23 +1,24 @@
 //! High-level SSA IR
 const std = @import("std");
-const util = @import("util.zig");
+const util = @import("util");
+pub const liveness = @import("ssa/liveness.zig");
 
 pub const Instruction = union(enum) {
     phi: Binary,
 
     i_const: u64,
 
-    i_add: Binary,
-    i_sub: Binary,
-    i_mul: Binary,
-    i_div: Binary,
+    add: Binary,
+    sub: Binary,
+    mul: Binary,
+    div: Binary,
 
-    i_eq: Binary,
-    i_ne: Binary,
-    i_lt: Binary,
-    i_le: Binary,
-    i_gt: Binary,
-    i_ge: Binary,
+    eq: Binary,
+    ne: Binary,
+    lt: Binary,
+    le: Binary,
+    gt: Binary,
+    ge: Binary,
 
     call: *const Call,
 
@@ -71,10 +72,15 @@ pub const Instruction = union(enum) {
     }
 
     pub const Ref = enum(u32) {
+        invalid = std.math.maxInt(u32),
         _,
 
         pub fn format(ref: Ref, _: []const u8, _: std.fmt.FormatOptions, w: anytype) !void {
-            try w.print("%{}", .{@intFromEnum(ref)});
+            if (ref == .invalid) {
+                try w.writeAll("%invalid");
+            } else {
+                try w.print("%{}", .{@intFromEnum(ref)});
+            }
         }
     };
 };
@@ -104,25 +110,35 @@ pub const Block = struct {
     };
 
     pub const Ref = enum(u32) {
+        invalid = std.math.maxInt(u32),
         _,
 
         pub fn format(ref: Ref, _: []const u8, _: std.fmt.FormatOptions, w: anytype) !void {
-            try w.print("@{}", .{@intFromEnum(ref)});
+            if (ref == .invalid) {
+                try w.writeAll("@invalid");
+            } else {
+                try w.print("@{}", .{@intFromEnum(ref)});
+            }
         }
     };
 
-    pub fn body(blk: Block, insns: util.IndexedStore(Instruction, Instruction.Ref)) []const Instruction {
-        return insns.items[@intFromEnum(blk.start)..][0..blk.count];
+    pub fn insns(blk: Block, i: util.IndexedStore(Instruction, Instruction.Ref)) []const Instruction {
+        return i.items[@intFromEnum(blk.start)..][0..blk.count];
+    }
+    pub fn types(blk: Block, t: util.IndexedStore(Type, Instruction.Ref)) []const Type {
+        return t.items[@intFromEnum(blk.start)..][0..blk.count];
     }
 };
 
 pub const Function = struct {
     arena: std.heap.ArenaAllocator.State,
     insns: util.IndexedStore(Instruction, Instruction.Ref),
+    types: util.IndexedStore(Type, Instruction.Ref),
     blocks: util.IndexedStore(Block, Block.Ref),
 
     pub fn deinit(func: Function, allocator: std.mem.Allocator) void {
         func.insns.deinit(allocator);
+        func.types.deinit(allocator);
         func.blocks.deinit(allocator);
         func.arena.promote(allocator).deinit();
     }
@@ -130,19 +146,40 @@ pub const Function = struct {
     pub fn format(func: Function, _: []const u8, _: std.fmt.FormatOptions, w: anytype) !void {
         for (func.blocks.items, 0..) |blk, blk_i| {
             try w.print("@{}:\n", .{blk_i});
-            for (blk.body(func.insns), @intFromEnum(blk.start)..) |insn, insn_i| {
-                try w.print("  %{} = {}\n", .{ insn_i, insn });
+            for (blk.insns(func.insns), blk.types(func.types), @intFromEnum(blk.start)..) |insn, ty, insn_i| {
+                try w.print("  %{}: {} = {}\n", .{ insn_i, ty, insn });
             }
             try w.print("  {}\n", .{blk.term});
         }
     }
 };
 
+pub const Type = enum {
+    // Unsigned integers
+    u8,
+    u16,
+    u32,
+    u64,
+
+    // Signed integers
+    s8,
+    s16,
+    s32,
+    s64,
+
+    bool,
+
+    pub fn format(ty: Type, _: []const u8, _: std.fmt.FormatOptions, w: anytype) !void {
+        try w.writeAll(@tagName(ty));
+    }
+};
+
 pub const Builder = struct {
     arena: std.heap.ArenaAllocator,
     insns: util.IndexedStore(Instruction, Instruction.Ref).Mutable = .{},
+    types: util.IndexedStore(Type, Instruction.Ref).Mutable = .{},
     blocks: util.IndexedStore(Block, Block.Ref).Mutable = .{},
-    current_block: ?Block.Ref = null, // Used to ensure blocks are constructed one at a time
+    current_block: Block.Ref = .invalid, // Used to ensure blocks are constructed one at a time
 
     pub fn init(allocator: std.mem.Allocator) Builder {
         return .{ .arena = std.heap.ArenaAllocator.init(allocator) };
@@ -160,11 +197,12 @@ pub const Builder = struct {
     }
 
     pub fn finish(b: *Builder) !Function {
-        std.debug.assert(b.current_block == null); // Check for unfinished blocks
+        std.debug.assert(b.current_block == .invalid); // Check for unfinished blocks
         const allocator = b.arena.child_allocator;
         const func = Function{
             .arena = b.arena.state,
             .insns = try b.insns.toConst(allocator),
+            .types = try b.types.toConst(allocator),
             .blocks = try b.blocks.toConst(allocator),
         };
         b.arena = std.heap.ArenaAllocator.init(allocator); // Reset arena so builder can be reused
@@ -175,7 +213,7 @@ pub const Builder = struct {
         b: *Builder,
         ref: Block.Ref,
 
-        pub fn i(b: *BlockBuilder, insn: Instruction) !Instruction.Ref {
+        pub fn i(b: *BlockBuilder, ty: Type, insn: Instruction) !Instruction.Ref {
             b.checkOrInitCurrentBlock();
 
             const arena = b.b.arena.allocator();
@@ -186,7 +224,11 @@ pub const Builder = struct {
                 else => insn,
             };
 
-            return b.b.insns.append(b.b.arena.child_allocator, copy);
+            const ty_ref = try b.b.types.append(b.b.arena.child_allocator, ty);
+            errdefer b.b.types.popLast();
+            const insn_ref = try b.b.insns.append(b.b.arena.child_allocator, copy);
+            std.debug.assert(ty_ref == insn_ref);
+            return insn_ref;
         }
 
         pub fn finish(b: *BlockBuilder, terminal: Block.Terminal) !void {
@@ -196,15 +238,15 @@ pub const Builder = struct {
             blk.count = b.b.insns.count() - @intFromEnum(blk.start);
             blk.term = terminal;
 
-            b.b.current_block = null;
+            b.b.current_block = .invalid;
         }
 
         fn checkOrInitCurrentBlock(b: BlockBuilder) void {
-            if (b.b.current_block) |blk| {
-                std.debug.assert(blk == b.ref); // Ensure blocks are constructed one at a time
-            } else {
+            if (b.b.current_block == .invalid) {
                 b.b.current_block = b.ref;
                 b.b.blocks.getPtr(b.ref).start = @enumFromInt(b.b.insns.count());
+            } else {
+                std.debug.assert(b.b.current_block == b.ref); // Ensure blocks are constructed one at a time
             }
         }
     };
@@ -217,14 +259,14 @@ comptime {
 test "format" {
     try std.testing.expectFmt(
         \\i_const 7
-        \\i_add %0, %1
+        \\add %0, %1
         \\call foo()
         \\call bar(%7, %4)
     ,
         "{}\n{}\n{}\n{}",
         .{
             Instruction{ .i_const = 7 },
-            Instruction{ .i_add = .{
+            Instruction{ .add = .{
                 .lhs = @enumFromInt(0),
                 .rhs = @enumFromInt(1),
             } },
@@ -248,14 +290,14 @@ test "builder" {
     defer b.deinit();
 
     var blk0 = try b.block();
-    const c0 = try blk0.i(.{ .i_const = 7 });
-    const c1 = try blk0.i(.{ .i_const = 13 });
-    const sum = try blk0.i(.{ .i_add = .{
+    const c0 = try blk0.i(.u32, .{ .i_const = 7 });
+    const c1 = try blk0.i(.u32, .{ .i_const = 13 });
+    const sum = try blk0.i(.u32, .{ .add = .{
         .lhs = c0,
         .rhs = c1,
     } });
-    const c2 = try blk0.i(.{ .i_const = 20 });
-    const cond = try blk0.i(.{ .i_lt = .{
+    const c2 = try blk0.i(.u32, .{ .i_const = 20 });
+    const cond = try blk0.i(.bool, .{ .lt = .{
         .lhs = sum,
         .rhs = c2,
     } });
@@ -268,13 +310,13 @@ test "builder" {
         .false = blk2.ref,
     } });
 
-    const call = try blk1.i(.{ .call = &.{
+    const call = try blk1.i(.u32, .{ .call = &.{
         .name = "add2",
         .args = &.{sum},
     } });
     try blk1.finish(.{ .jump = blk2.ref });
 
-    const phi = try blk2.i(.{ .phi = .{
+    const phi = try blk2.i(.u32, .{ .phi = .{
         .lhs = sum,
         .rhs = call,
     } });
@@ -284,17 +326,17 @@ test "builder" {
     defer func.deinit(std.testing.allocator);
     try std.testing.expectFmt(
         \\@0:
-        \\  %0 = i_const 7
-        \\  %1 = i_const 13
-        \\  %2 = i_add %0, %1
-        \\  %3 = i_const 20
-        \\  %4 = i_lt %2, %3
+        \\  %0: u32 = i_const 7
+        \\  %1: u32 = i_const 13
+        \\  %2: u32 = add %0, %1
+        \\  %3: u32 = i_const 20
+        \\  %4: bool = lt %2, %3
         \\  branch %4, @1, @2
         \\@1:
-        \\  %5 = call add2(%2)
+        \\  %5: u32 = call add2(%2)
         \\  jump @2
         \\@2:
-        \\  %6 = phi %2, %5
+        \\  %6: u32 = phi %2, %5
         \\  ret %6
         \\
     , "{}", .{func});
