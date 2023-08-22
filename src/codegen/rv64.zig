@@ -4,6 +4,7 @@ const std = @import("std");
 const rv64 = @import("asm").rv64;
 const ssa = @import("ssa");
 const util = @import("util");
+const regalloc = @import("regalloc.zig");
 
 pub fn compile(
     allocator: std.mem.Allocator,
@@ -75,30 +76,25 @@ const Compiler = struct {
                 .i_const => |value| {
                     // TODO: immediates
                     const reg = try comp.allocRegister(insn_ref);
-                    switch (ty) {
-                        .u8 => {
-                            if (do_emit) {
-                                const v8: u8 = @intCast(value);
-                                try comp.emit(offset, .{ .addi = .{ reg, .x0, v8 } });
-                            }
-                            count += 1;
-                        },
-                        .u16 => {
-                            if (do_emit) {
-                                const v16: u16 = @intCast(value);
-                                const v12: u12 = @truncate(v16);
-                                try comp.emit(offset, .{ .lui = .{ reg, v16 & 0xf000 } });
-                                try comp.emit(offset + 1, .{ .addi = .{ reg, reg, v12 } });
-                            }
-                            count += 2;
-                        },
-                        .u32 => {
-                            const lsb = value & 1 != 0;
-                            const msb = value & (1 << 31) != 0;
+                    switch (ty.kind()) {
+                        .unsigned_int => {
+                            if (std.math.cast(u12, value)) |v12| {
+                                if (do_emit) {
+                                    try comp.emit(offset, .{ .addi = .{ reg, .x0, v12 } });
+                                }
+                                count += 1;
+                            } else if (std.math.cast(u31, value)) |v31| {
+                                if (do_emit) {
+                                    const top = v31 & 0x7ffff000;
+                                    const bottom: u12 = @truncate(v31);
+                                    try comp.emit(offset, .{ .lui = .{ reg, top } });
+                                    try comp.emit(offset + 1, .{ .addi = .{ reg, reg, bottom } });
+                                }
+                                count += 2;
+                            } else if (std.math.cast(u32, value)) |v32| {
+                                const lsb = value & 1 != 0;
 
-                            if (do_emit) {
-                                const v32: u32 = @intCast(value);
-                                if (msb) {
+                                if (do_emit) {
                                     const top = v32 >> 1 & 0x7ffff000;
                                     const bottom: u12 = @truncate(v32 >> 1);
                                     try comp.emit(offset, .{ .lui = .{ reg, top } });
@@ -107,20 +103,12 @@ const Compiler = struct {
                                     if (lsb) {
                                         try comp.emit(offset + 3, .{ .addi = .{ reg, reg, 1 } });
                                     }
-                                } else {
-                                    const top = v32 & 0x7ffff000;
-                                    const bottom: u12 = @truncate(v32);
-                                    try comp.emit(offset, .{ .lui = .{ reg, top } });
-                                    try comp.emit(offset + 1, .{ .addi = .{ reg, reg, bottom } });
                                 }
-                            }
 
-                            count += if (msb and lsb)
-                                4
-                            else if (msb)
-                                3
-                            else
-                                2;
+                                count += if (lsb) 4 else 3;
+                            } else {
+                                @panic("TODO");
+                            }
                         },
 
                         else => @panic("TODO"),
@@ -164,6 +152,7 @@ const Compiler = struct {
 
 comptime {
     std.testing.refAllDeclsRecursive(@This());
+    std.testing.refAllDeclsRecursive(regalloc);
 }
 
 test "basic arithmetic" {
@@ -171,22 +160,46 @@ test "basic arithmetic" {
     defer b.deinit();
 
     var blk = try b.block(&.{});
-    const c0 = try blk.i(.u32, .{ .i_const = 13 });
-    const c1 = try blk.i(.u32, .{ .i_const = 7 });
-    const add = try blk.i(.u32, .{ .add = .{ .lhs = c0, .rhs = c1 } });
-    const c2 = try blk.i(.u32, .{ .i_const = 4 });
-    const sub = try blk.i(.u32, .{ .sub = .{ .lhs = add, .rhs = c2 } });
-    try blk.ret(sub);
+    const c_13 = try blk.i(.u32, .{ .i_const = 13 });
+    const c_7 = try blk.i(.u32, .{ .i_const = 7 });
+    const add = try blk.i(.u32, .{ .add = .{ .lhs = c_13, .rhs = c_7 } });
+    const c_4 = try blk.i(.u32, .{ .i_const = 4 });
+    const sub = try blk.i(.u32, .{ .sub = .{ .lhs = add, .rhs = c_4 } });
+    const c_3 = try blk.i(.u32, .{ .i_const = 3 });
+    const mul = try blk.i(.u32, .{ .mul = .{ .lhs = sub, .rhs = c_3 } });
+    const div = try blk.i(.u32, .{ .div = .{ .lhs = mul, .rhs = c_4 } });
+    try blk.ret(div);
 
     const func = try b.finish();
     defer func.deinit(std.testing.allocator);
 
+    try testGen(func, &.{
+        .{ .addi = .{ .x3, .x0, 13 } },
+        .{ .addi = .{ .x4, .x0, 7 } },
+        // .{ .add = .{ ..., .x3, .x4 } },
+        .{ .addi = .{ .x3, .x0, 4 } },
+        // .{ .sub = .{ ..., ..., .x5 },
+        .{ .addi = .{ .x4, .x0, 3 } },
+        // .{ .mul = .{ ..., ..., .x6 },
+        // .{ .div = .{ ..., ..., .x5 },
+    });
+}
+
+fn testGen(func: ssa.Function, expected: []const rv64.Instruction) !void {
     const liveness = try ssa.liveness.analyze(std.testing.allocator, func);
     defer liveness.deinit(std.testing.allocator);
 
     const code = try compile(std.testing.allocator, std.testing.allocator, func, liveness);
     defer std.testing.allocator.free(code);
 
-    // TODO: check generated code
-    std.debug.print("{}\n", .{std.fmt.fmtSliceHexLower(code)});
+    const exp_assembled = try std.testing.allocator.alloc(u32, expected.len);
+    defer std.testing.allocator.free(exp_assembled);
+    for (exp_assembled, expected) |*word, insn| {
+        word.* = try rv64.assembleInstruction(insn);
+        if (@import("builtin").cpu.arch.endian() != .Little) {
+            word.* = @byteSwap(word.*);
+        }
+    }
+
+    try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(exp_assembled), code);
 }

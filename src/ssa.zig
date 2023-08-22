@@ -86,8 +86,6 @@ pub const Instruction = union(enum) {
 };
 
 pub const Block = struct {
-    params: []const Type,
-
     start: Instruction.Ref,
     count: u32,
 
@@ -177,29 +175,63 @@ pub const Function = struct {
         func.arena.promote(allocator).deinit();
     }
 
-    pub fn format(func: Function, _: []const u8, _: std.fmt.FormatOptions, w: anytype) !void {
-        for (func.blocks.items, 0..) |blk, blk_i| {
-            try w.print("@{}(", .{blk_i});
-            var params = true;
-            for (blk.insns(func.insns), blk.types(func.types), 0..) |insn, ty, insn_i| {
-                if (insn == .param) {
-                    std.debug.assert(params);
-                    if (insn_i > 0) {
-                        try w.writeAll(", ");
+    pub fn format(func: Function, comptime fmt: []const u8, opts: std.fmt.FormatOptions, w: anytype) !void {
+        try func.fmtWithAnnotations(.{}).format(fmt, opts, w);
+    }
+
+    pub fn fmtWithAnnotations(func: *const Function, annotations: anytype) AnnotatedFormatter(@TypeOf(annotations)) {
+        return .{ .func = func, .annotations = annotations };
+    }
+
+    pub fn AnnotatedFormatter(comptime AnnotationsTuple: type) type {
+        return struct {
+            func: *const Function,
+            annotations: AnnotationsTuple,
+
+            pub fn format(fmt: @This(), _: []const u8, _: std.fmt.FormatOptions, w: anytype) !void {
+                for (fmt.func.blocks.items, 0..) |blk, blk_i| {
+                    try w.print("@{}(", .{blk_i});
+                    if (fmt.annotations.len > 0) {
+                        try w.writeAll("\n");
                     }
-                    try w.print("{}", .{ty});
-                    continue;
-                } else if (params) {
-                    try w.writeAll("):\n");
-                    params = false;
+
+                    var params = true;
+                    for (blk.insns(fmt.func.insns), blk.types(fmt.func.types), 0..) |insn, ty, insn_i| {
+                        const insn_ref: Instruction.Ref = @enumFromInt(insn_i);
+
+                        if (insn == .param) {
+                            std.debug.assert(params);
+                            if (fmt.annotations.len == 0) {
+                                if (insn_i > 0) try w.writeAll(", ");
+                            } else {
+                                try w.writeAll("    ");
+                            }
+                            try w.print("{}: {}", .{ insn_ref, ty });
+                            inline for (fmt.annotations) |annot| {
+                                try w.print("    {}", .{annot.get(blk.start, insn_ref)});
+                            }
+                            if (fmt.annotations.len > 0) {
+                                try w.writeAll("\n");
+                            }
+                            continue;
+                        } else if (params) {
+                            try w.writeAll("):\n");
+                            params = false;
+                        }
+
+                        try w.print("  {}: {} = {}", .{ insn_ref, ty, insn });
+                        inline for (fmt.annotations) |annot| {
+                            try w.print("    {}", .{annot.get(blk.start, insn_ref)});
+                        }
+                        try w.writeAll("\n");
+                    }
+                    if (params) {
+                        try w.writeAll("):\n");
+                    }
+                    try w.print("  {}\n", .{blk.term});
                 }
-                try w.print("  %{}: {} = {}\n", .{ insn_i, ty, insn });
             }
-            if (params) {
-                try w.writeAll("):\n");
-            }
-            try w.print("  {}\n", .{blk.term});
-        }
+        };
     }
 };
 
@@ -217,6 +249,19 @@ pub const Type = enum {
     s64,
 
     bool,
+
+    pub fn kind(ty: Type) Kind {
+        return switch (ty) {
+            .u8, .u16, .u32, .u64 => .unsigned_int,
+            .s8, .s16, .s32, .s64 => .signed_int,
+            .bool => .boolean,
+        };
+    }
+    pub const Kind = enum {
+        unsigned_int,
+        signed_int,
+        boolean,
+    };
 
     pub fn format(ty: Type, _: []const u8, _: std.fmt.FormatOptions, w: anytype) !void {
         try w.writeAll(@tagName(ty));
@@ -237,6 +282,7 @@ pub const Builder = struct {
     pub fn deinit(b: *Builder) void {
         const allocator = b.arena.child_allocator;
         b.insns.deinit(allocator);
+        b.types.deinit(allocator);
         b.blocks.deinit(allocator);
         b.arena.deinit();
     }
@@ -355,9 +401,9 @@ pub const Builder = struct {
             b.args.deinit(allocator);
         }
 
-        pub fn to(b: *JumpBuilder, target: BlockBuilder) void {
+        pub fn to(b: *JumpBuilder, target: Block.Ref) void {
             std.debug.assert(b.target == .invalid); // Cannot jump to more than one location
-            b.target = target.ref;
+            b.target = target;
         }
 
         pub fn addArg(b: *JumpBuilder, value: Instruction.Ref) !void {
@@ -396,17 +442,17 @@ pub const Builder = struct {
             b.args.deinit(allocator);
         }
 
-        pub fn @"true"(b: *BranchBuilder, target: BlockBuilder) void {
+        pub fn @"true"(b: *BranchBuilder, target: Block.Ref) void {
             std.debug.assert(b.true_target == .invalid); // Cannot call `true` multiple times
             std.debug.assert(b.false_target == .invalid); // `true` must be called before `false`
-            b.true_target = target.ref;
+            b.true_target = target;
         }
-        pub fn @"false"(b: *BranchBuilder, target: BlockBuilder) !void {
+        pub fn @"false"(b: *BranchBuilder, target: Block.Ref) !void {
             std.debug.assert(b.true_target != .invalid); // `true` must be called before `false`
             std.debug.assert(b.false_target == .invalid); // Cannot call `false` multiple times
             const allocator = b.b.arena.child_allocator;
             try b.args.append(allocator, .invalid);
-            b.false_target = target.ref;
+            b.false_target = target;
         }
 
         pub fn addArg(b: *BranchBuilder, value: Instruction.Ref) !void {
@@ -489,7 +535,7 @@ test "builder" {
     defer br.deinit();
 
     var blk1 = try b.block(&.{.u32});
-    br.true(blk1);
+    br.true(blk1.ref);
     try br.addArg(sum);
 
     const call = try blk1.i(.u32, .{ .call = &.{
@@ -501,11 +547,11 @@ test "builder" {
 
     var blk2 = try b.block(&.{.u32});
 
-    try br.false(blk2);
+    try br.false(blk2.ref);
     try br.addArg(sum);
     try br.finish();
 
-    j.to(blk2);
+    j.to(blk2.ref);
     try j.addArg(call);
     try j.finish();
 
@@ -521,10 +567,10 @@ test "builder" {
         \\  %3: u32 = i_const 20
         \\  %4: bool = lt %2, %3
         \\  branch %4, @1(%2), @2(%2)
-        \\@1(u32):
+        \\@1(%0: u32):
         \\  %1: u32 = call add2(%0)
         \\  jump @2(%1)
-        \\@2(u32):
+        \\@2(%0: u32):
         \\  ret %0
         \\
     , "{}", .{func});
