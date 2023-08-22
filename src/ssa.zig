@@ -4,8 +4,7 @@ const util = @import("util");
 pub const liveness = @import("ssa/liveness.zig");
 
 pub const Instruction = union(enum) {
-    phi: Phi,
-    copy: Ref,
+    param: void,
 
     i_const: u64,
 
@@ -22,27 +21,6 @@ pub const Instruction = union(enum) {
     ge: Binary,
 
     call: *const Call,
-
-    pub const Phi = struct {
-        values: [*:.invalid]const Ref,
-
-        pub fn format(phi: Phi, _: []const u8, _: std.fmt.FormatOptions, w: anytype) !void {
-            var i: usize = 0;
-            while (phi.values[i] != .invalid) : (i += 1) {
-                if (i > 0) {
-                    try w.writeAll(", ");
-                }
-                try w.print("{}", .{phi.values[i]});
-            }
-        }
-
-        fn clone(phi: Phi, allocator: std.mem.Allocator) !Phi {
-            const old_values = std.mem.span(phi.values);
-            const values = try allocator.allocSentinel(Ref, old_values.len, .invalid);
-            @memcpy(values, old_values);
-            return .{ .values = values };
-        }
-    };
 
     pub const Binary = struct {
         lhs: Ref,
@@ -108,6 +86,8 @@ pub const Instruction = union(enum) {
 };
 
 pub const Block = struct {
+    params: []const Type,
+
     start: Instruction.Ref,
     count: u32,
 
@@ -115,18 +95,50 @@ pub const Block = struct {
 
     pub const Terminal = union(enum) {
         ret: Instruction.Ref,
-        jump: Block.Ref,
+        jump: struct {
+            to: Block.Ref,
+            args: [*:.invalid]Instruction.Ref,
+        },
         branch: struct {
             cond: Instruction.Ref,
             true: Block.Ref,
             false: Block.Ref,
+            // Up until the first sentinel, args for true. After the first sentinel, args for false
+            args: [*:.invalid]Instruction.Ref,
         },
 
         pub fn format(term: Terminal, _: []const u8, _: std.fmt.FormatOptions, w: anytype) !void {
             try w.print("{s} ", .{@tagName(term)});
             switch (term) {
-                inline .ret, .jump => |arg| try w.print("{}", .{arg}),
-                .branch => |br| try w.print("{[cond]}, {[true]}, {[false]}", br),
+                .ret => |v| try w.print("{}", .{v}),
+
+                .jump => |j| {
+                    try w.print("{}(", .{j.to});
+                    var i: usize = 0;
+                    while (j.args[i] != .invalid) : (i += 1) {
+                        if (i > 0) try w.writeAll(", ");
+                        try w.print("{}", .{j.args[i]});
+                    }
+                    try w.writeAll(")");
+                },
+
+                .branch => |br| {
+                    try w.print("{}, {}(", .{ br.cond, br.true });
+                    var i: usize = 0;
+                    while (br.args[i] != .invalid) : (i += 1) {
+                        if (i > 0) try w.writeAll(", ");
+                        try w.print("{}", .{br.args[i]});
+                    }
+
+                    try w.print("), {}(", .{br.false});
+                    i += 1;
+                    const false_start = i;
+                    while (br.args[i] != .invalid) : (i += 1) {
+                        if (i > false_start) try w.writeAll(", ");
+                        try w.print("{}", .{br.args[i]});
+                    }
+                    try w.writeAll(")");
+                },
             }
         }
     };
@@ -144,18 +156,18 @@ pub const Block = struct {
         }
     };
 
-    pub fn insns(blk: Block, i: util.IndexedStore(Instruction, Instruction.Ref)) []const Instruction {
+    pub fn insns(blk: Block, i: util.SectionIndexedStore(Instruction, Instruction.Ref)) []const Instruction {
         return i.items[@intFromEnum(blk.start)..][0..blk.count];
     }
-    pub fn types(blk: Block, t: util.IndexedStore(Type, Instruction.Ref)) []const Type {
+    pub fn types(blk: Block, t: util.SectionIndexedStore(Type, Instruction.Ref)) []const Type {
         return t.items[@intFromEnum(blk.start)..][0..blk.count];
     }
 };
 
 pub const Function = struct {
     arena: std.heap.ArenaAllocator.State,
-    insns: util.IndexedStore(Instruction, Instruction.Ref),
-    types: util.IndexedStore(Type, Instruction.Ref),
+    insns: util.SectionIndexedStore(Instruction, Instruction.Ref),
+    types: util.SectionIndexedStore(Type, Instruction.Ref),
     blocks: util.IndexedStore(Block, Block.Ref),
 
     pub fn deinit(func: Function, allocator: std.mem.Allocator) void {
@@ -167,9 +179,24 @@ pub const Function = struct {
 
     pub fn format(func: Function, _: []const u8, _: std.fmt.FormatOptions, w: anytype) !void {
         for (func.blocks.items, 0..) |blk, blk_i| {
-            try w.print("@{}:\n", .{blk_i});
-            for (blk.insns(func.insns), blk.types(func.types), @intFromEnum(blk.start)..) |insn, ty, insn_i| {
+            try w.print("@{}(", .{blk_i});
+            var params = true;
+            for (blk.insns(func.insns), blk.types(func.types), 0..) |insn, ty, insn_i| {
+                if (insn == .param) {
+                    std.debug.assert(params);
+                    if (insn_i > 0) {
+                        try w.writeAll(", ");
+                    }
+                    try w.print("{}", .{ty});
+                    continue;
+                } else if (params) {
+                    try w.writeAll("):\n");
+                    params = false;
+                }
                 try w.print("  %{}: {} = {}\n", .{ insn_i, ty, insn });
+            }
+            if (params) {
+                try w.writeAll("):\n");
             }
             try w.print("  {}\n", .{blk.term});
         }
@@ -198,11 +225,11 @@ pub const Type = enum {
 
 pub const Builder = struct {
     arena: std.heap.ArenaAllocator,
-    insns: util.IndexedStore(Instruction, Instruction.Ref).Mutable = .{},
-    types: util.IndexedStore(Type, Instruction.Ref).Mutable = .{},
+    insns: util.SectionIndexedStore(Instruction, Instruction.Ref).Mutable = .{},
+    types: util.SectionIndexedStore(Type, Instruction.Ref).Mutable = .{},
     blocks: util.IndexedStore(Block, Block.Ref).Mutable = .{},
     current_block: Block.Ref = .invalid, // Used to ensure blocks are constructed one at a time
-    unfinished_phis: usize = 0,
+    unfinished_blocks: u32 = 0,
 
     pub fn init(allocator: std.mem.Allocator) Builder {
         return .{ .arena = std.heap.ArenaAllocator.init(allocator) };
@@ -214,14 +241,28 @@ pub const Builder = struct {
         b.arena.deinit();
     }
 
-    pub fn block(b: *Builder) !BlockBuilder {
-        const blk = try b.blocks.appendUndefined(b.arena.child_allocator);
-        return .{ .b = b, .ref = blk };
+    pub fn block(b: *Builder, params: []const Type) !BlockBuilder {
+        std.debug.assert(b.current_block == .invalid); // Ensure no block is already being built
+
+        const ref = try b.blocks.appendUndefined(b.arena.child_allocator);
+        b.current_block = ref;
+        b.unfinished_blocks += 1;
+
+        const blk = b.blocks.getPtr(ref);
+        blk.start = @enumFromInt(b.insns.count());
+
+        var bb: BlockBuilder = .{ .b = b, .ref = ref };
+        for (params) |ty| {
+            _ = try bb.i(ty, .param);
+        }
+
+        return bb;
     }
 
     pub fn finish(b: *Builder) !Function {
-        std.debug.assert(b.current_block == .invalid); // Check for unfinished blocks
-        std.debug.assert(b.unfinished_phis == 0); // Check for unfinished phis
+        std.debug.assert(b.current_block == .invalid); // Check for in-progress blocks
+        std.debug.assert(b.unfinished_blocks == 0); // Check for unfinished blocks
+
         const allocator = b.arena.child_allocator;
         const func = Function{
             .arena = b.arena.state,
@@ -237,12 +278,12 @@ pub const Builder = struct {
         b: *Builder,
         ref: Block.Ref,
 
-        pub fn i(b: *BlockBuilder, ty: Type, insn: Instruction) !Instruction.Ref {
-            b.checkOrInitCurrentBlock();
+        pub fn i(b: BlockBuilder, ty: Type, insn: Instruction) !Instruction.Ref {
+            b.checkCurrentBlock();
 
             const arena = b.b.arena.allocator();
             const copy: Instruction = switch (insn) {
-                inline .phi, .call => |data, name| @unionInit(
+                inline .call => |data, name| @unionInit(
                     Instruction,
                     @tagName(name),
                     try data.clone(arena),
@@ -252,68 +293,144 @@ pub const Builder = struct {
                 else => insn,
             };
 
-            const ty_ref = try b.b.types.append(b.b.arena.child_allocator, ty);
+            const start = b.b.blocks.get(b.ref).start;
+            const ty_ref = try b.b.types.append(b.b.arena.child_allocator, start, ty);
             errdefer b.b.types.popLast();
-            const insn_ref = try b.b.insns.append(b.b.arena.child_allocator, copy);
+            const insn_ref = try b.b.insns.append(b.b.arena.child_allocator, start, copy);
             std.debug.assert(ty_ref == insn_ref);
             return insn_ref;
         }
 
-        pub fn phi(b: *BlockBuilder, ty: Type) !PhiBuilder {
-            b.checkOrInitCurrentBlock();
-
-            const ty_ref = try b.b.types.append(b.b.arena.child_allocator, ty);
-            errdefer b.b.types.popLast();
-            const insn_ref = try b.b.insns.appendUndefined(b.b.arena.child_allocator);
-            std.debug.assert(ty_ref == insn_ref);
-
-            b.b.unfinished_phis += 1;
-            return .{ .b = b.b, .ref = insn_ref };
+        pub fn arg(b: BlockBuilder, index: u32) Instruction.Ref {
+            const ref: Instruction.Ref = @enumFromInt(index);
+            if (std.debug.runtime_safety) {
+                const start = b.b.blocks.get(b.ref).start;
+                std.debug.assert(b.b.insns.get(start, ref) == .param);
+            }
+            return ref;
         }
 
-        pub fn finish(b: *BlockBuilder, terminal: Block.Terminal) !void {
-            b.checkOrInitCurrentBlock();
+        /// Finish the block by returning
+        pub fn ret(b: BlockBuilder, value: Instruction.Ref) !void {
+            try b.finish();
+            b.b.blocks.getPtr(b.ref).term = .{ .ret = value };
+            b.b.unfinished_blocks -= 1;
+        }
+
+        /// Finish the block by jumping
+        pub fn jump(b: BlockBuilder) !JumpBuilder {
+            try b.finish();
+            return .{ .b = b.b, .blk = b.ref };
+        }
+
+        /// Finish the block by branching
+        pub fn branch(b: BlockBuilder, cond: Instruction.Ref) !BranchBuilder {
+            try b.finish();
+            return .{ .b = b.b, .blk = b.ref, .cond = cond };
+        }
+
+        fn finish(b: BlockBuilder) !void {
+            b.checkCurrentBlock();
 
             const blk = b.b.blocks.getPtr(b.ref);
             blk.count = b.b.insns.count() - @intFromEnum(blk.start);
-            blk.term = terminal;
 
             b.b.current_block = .invalid;
         }
 
-        fn checkOrInitCurrentBlock(b: BlockBuilder) void {
-            if (b.b.current_block == .invalid) {
-                b.b.current_block = b.ref;
-                b.b.blocks.getPtr(b.ref).start = @enumFromInt(b.b.insns.count());
-            } else {
-                std.debug.assert(b.b.current_block == b.ref); // Ensure blocks are constructed one at a time
-            }
+        fn checkCurrentBlock(b: BlockBuilder) void {
+            std.debug.assert(b.b.current_block == b.ref); // Ensure blocks are constructed one at a time
         }
     };
 
-    pub const PhiBuilder = struct {
+    pub const JumpBuilder = struct {
         b: *Builder,
-        ref: Instruction.Ref,
-        values: std.ArrayListUnmanaged(Instruction.Ref) = .{},
-        finished: bool = false,
+        blk: Block.Ref,
 
-        pub fn deinit(b: *PhiBuilder) void {
+        target: Block.Ref = .invalid,
+        args: std.ArrayListUnmanaged(Instruction.Ref) = .{},
+
+        pub fn deinit(b: *JumpBuilder) void {
             const allocator = b.b.arena.child_allocator;
-            b.values.deinit(allocator);
+            b.args.deinit(allocator);
         }
 
-        pub fn add(b: *PhiBuilder, value: Instruction.Ref) !void {
-            std.debug.assert(!b.finished);
-            try b.values.append(b.b.arena.child_allocator, value);
+        pub fn to(b: *JumpBuilder, target: BlockBuilder) void {
+            std.debug.assert(b.target == .invalid); // Cannot jump to more than one location
+            b.target = target.ref;
         }
 
-        pub fn finish(b: *PhiBuilder) !void {
-            const values = try b.b.arena.allocator().allocSentinel(Instruction.Ref, b.values.items.len, .invalid);
-            @memcpy(values, b.values.items);
-            b.b.insns.getPtr(b.ref).* = .{ .phi = .{ .values = values } };
+        pub fn addArg(b: *JumpBuilder, value: Instruction.Ref) !void {
+            const allocator = b.b.arena.child_allocator;
+            try b.args.append(allocator, value);
+        }
 
-            b.finished = true;
-            b.b.unfinished_phis -= 1;
+        pub fn finish(b: *JumpBuilder) !void {
+            std.debug.assert(b.target != .invalid); // Must set target before finishing
+
+            const arena = b.b.arena.allocator();
+            const args = try arena.alloc(Instruction.Ref, b.args.items.len + 1);
+            errdefer arena.free(args);
+            @memcpy(args[0 .. args.len - 1], b.args.items);
+            args[args.len - 1] = .invalid;
+
+            b.b.blocks.getPtr(b.blk).term = .{ .jump = .{
+                .to = b.target,
+                .args = args[0 .. args.len - 1 :.invalid],
+            } };
+            b.b.unfinished_blocks -= 1;
+        }
+    };
+
+    pub const BranchBuilder = struct {
+        b: *Builder,
+        blk: Block.Ref,
+
+        cond: Instruction.Ref,
+        true_target: Block.Ref = .invalid,
+        false_target: Block.Ref = .invalid,
+        args: std.ArrayListUnmanaged(Instruction.Ref) = .{},
+
+        pub fn deinit(b: *BranchBuilder) void {
+            const allocator = b.b.arena.child_allocator;
+            b.args.deinit(allocator);
+        }
+
+        pub fn @"true"(b: *BranchBuilder, target: BlockBuilder) void {
+            std.debug.assert(b.true_target == .invalid); // Cannot call `true` multiple times
+            std.debug.assert(b.false_target == .invalid); // `true` must be called before `false`
+            b.true_target = target.ref;
+        }
+        pub fn @"false"(b: *BranchBuilder, target: BlockBuilder) !void {
+            std.debug.assert(b.true_target != .invalid); // `true` must be called before `false`
+            std.debug.assert(b.false_target == .invalid); // Cannot call `false` multiple times
+            const allocator = b.b.arena.child_allocator;
+            try b.args.append(allocator, .invalid);
+            b.false_target = target.ref;
+        }
+
+        pub fn addArg(b: *BranchBuilder, value: Instruction.Ref) !void {
+            std.debug.assert(b.true_target != .invalid); // Must call `true` and/or `false` before `addArg`
+            const allocator = b.b.arena.child_allocator;
+            try b.args.append(allocator, value);
+        }
+
+        pub fn finish(b: *BranchBuilder) !void {
+            std.debug.assert(b.true_target != .invalid and b.false_target != .invalid); // Must call both `true` and `false` before `finish`
+
+            const arena = b.b.arena.allocator();
+            const args = try arena.alloc(Instruction.Ref, b.args.items.len + 1);
+            errdefer arena.free(args);
+            @memcpy(args[0 .. args.len - 1], b.args.items);
+            args[args.len - 1] = .invalid;
+
+            b.b.blocks.getPtr(b.blk).term = .{ .branch = .{
+                .cond = b.cond,
+                .true = b.true_target,
+                .false = b.false_target,
+                .args = args[0 .. args.len - 1 :.invalid],
+            } };
+            b.b.unfinished_blocks -= 1;
         }
     };
 };
@@ -355,7 +472,7 @@ test "builder" {
     var b = Builder.init(std.testing.allocator);
     defer b.deinit();
 
-    var blk0 = try b.block();
+    var blk0 = try b.block(&.{});
     const c0 = try blk0.i(.u32, .{ .i_const = 7 });
     const c1 = try blk0.i(.u32, .{ .i_const = 13 });
     const sum = try blk0.i(.u32, .{ .add = .{
@@ -368,45 +485,47 @@ test "builder" {
         .rhs = c2,
     } });
 
-    var blk1 = try b.block();
-    var blk2 = try b.block();
-    try blk0.finish(.{ .branch = .{
-        .cond = cond,
-        .true = blk1.ref,
-        .false = blk2.ref,
-    } });
+    var br = try blk0.branch(cond);
+    defer br.deinit();
+
+    var blk1 = try b.block(&.{.u32});
+    br.true(blk1);
+    try br.addArg(sum);
 
     const call = try blk1.i(.u32, .{ .call = &.{
         .name = "add2",
-        .args = &.{sum},
+        .args = &.{blk1.arg(0)},
     } });
-    try blk1.finish(.{ .jump = blk2.ref });
+    var j = try blk1.jump();
+    defer j.deinit();
 
-    var phi = try blk2.phi(.u32);
-    {
-        defer phi.deinit();
-        try phi.add(sum);
-        try phi.add(call);
-        try phi.finish();
-    }
-    try blk2.finish(.{ .ret = phi.ref });
+    var blk2 = try b.block(&.{.u32});
+
+    try br.false(blk2);
+    try br.addArg(sum);
+    try br.finish();
+
+    j.to(blk2);
+    try j.addArg(call);
+    try j.finish();
+
+    try blk2.ret(blk2.arg(0));
 
     const func = try b.finish();
     defer func.deinit(std.testing.allocator);
     try std.testing.expectFmt(
-        \\@0:
+        \\@0():
         \\  %0: u32 = i_const 7
         \\  %1: u32 = i_const 13
         \\  %2: u32 = add %0, %1
         \\  %3: u32 = i_const 20
         \\  %4: bool = lt %2, %3
-        \\  branch %4, @1, @2
-        \\@1:
-        \\  %5: u32 = call add2(%2)
-        \\  jump @2
-        \\@2:
-        \\  %6: u32 = phi %2, %5
-        \\  ret %6
+        \\  branch %4, @1(%2), @2(%2)
+        \\@1(u32):
+        \\  %1: u32 = call add2(%0)
+        \\  jump @2(%1)
+        \\@2(u32):
+        \\  ret %0
         \\
     , "{}", .{func});
 }

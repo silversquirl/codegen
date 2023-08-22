@@ -70,8 +70,7 @@ const Compiler = struct {
             const offset = start_offset + count;
             const insn_ref: ssa.Instruction.Ref = @enumFromInt(insn_idx);
             switch (insn) {
-                .phi => {}, // TODO
-                .copy => {}, // TODO
+                .param => {}, // TODO
 
                 .i_const => |value| {
                     // TODO: immediates
@@ -171,13 +170,13 @@ test "basic arithmetic" {
     var b = ssa.Builder.init(std.testing.allocator);
     defer b.deinit();
 
-    var blk = try b.block();
+    var blk = try b.block(&.{});
     const c0 = try blk.i(.u32, .{ .i_const = 13 });
     const c1 = try blk.i(.u32, .{ .i_const = 7 });
     const add = try blk.i(.u32, .{ .add = .{ .lhs = c0, .rhs = c1 } });
     const c2 = try blk.i(.u32, .{ .i_const = 4 });
     const sub = try blk.i(.u32, .{ .sub = .{ .lhs = add, .rhs = c2 } });
-    try blk.finish(.{ .ret = sub });
+    try blk.ret(sub);
 
     const func = try b.finish();
     defer func.deinit(std.testing.allocator);
