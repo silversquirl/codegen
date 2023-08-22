@@ -41,7 +41,7 @@ const Compiler = struct {
     allocator: std.mem.Allocator,
     func: ssa.Function,
     liveness: ssa.liveness.LivenessInfo,
-    labels: util.IndexedStore(u32, ssa.Block.Ref).Mutable = .{},
+    labels: util.IndexedStore(ssa.Block.Ref, u32).Mutable = .{},
     // one less because x0 cannot be allocated (it is always zero)
     register_lifetimes: [nreg - 1]ssa.Instruction.Ref = .{.invalid} ** (nreg - 1),
     code: []u8 = undefined,

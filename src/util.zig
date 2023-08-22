@@ -1,8 +1,8 @@
 //! General utilities for data-oriented design, etc
 const std = @import("std");
 
-pub fn IndexedStore(comptime Value: type, comptime Index: type) type {
-    const invalid = checkIndexType(Index);
+pub fn IndexedStore(comptime Index: type, comptime Value: type) type {
+    const invalid = checkIndexType("Index", Index);
     return struct {
         items: []const Value,
 
@@ -78,8 +78,20 @@ pub fn IndexedStore(comptime Value: type, comptime Index: type) type {
     };
 }
 
-pub fn SectionIndexedStore(comptime Value: type, comptime Index: type) type {
-    const invalid = checkIndexType(Index);
+pub fn SectionIndexedStore(comptime BaseIndex: type, comptime OffsetIndex: type, comptime Value: type) type {
+    const bi = @typeInfo(BaseIndex);
+    if (bi != .Enum) {
+        @compileError("BaseIndex must be an enum type");
+    }
+    if (bi.Enum.is_exhaustive) {
+        @compileError("BaseIndex must not be exhaustive");
+    }
+    if (bi.Enum.fields.len > 0) {
+        @compileError("BaseIndex must have no fields");
+    }
+
+    const invalid = checkIndexType("OffsetIndex", OffsetIndex);
+
     return struct {
         items: []const Value,
 
@@ -89,14 +101,14 @@ pub fn SectionIndexedStore(comptime Value: type, comptime Index: type) type {
             allocator.free(store.items);
         }
 
-        pub fn get(store: Self, base: Index, offset: Index) Value {
+        pub fn get(store: Self, base: BaseIndex, offset: OffsetIndex) Value {
+            checkInvalid(offset);
             const index = @intFromEnum(base) + @intFromEnum(offset);
-            checkInvalid(index);
             return store.items[index];
         }
-        pub inline fn getPtr(store: Self, base: Index, offset: Index) *const Value {
+        pub inline fn getPtr(store: Self, base: BaseIndex, offset: OffsetIndex) *const Value {
+            checkInvalid(offset);
             const index = @intFromEnum(base) + @intFromEnum(offset);
-            checkInvalid(index);
             return &store.items[index];
         }
 
@@ -104,10 +116,9 @@ pub fn SectionIndexedStore(comptime Value: type, comptime Index: type) type {
             return @intCast(store.items.len);
         }
 
-        inline fn checkInvalid(index: u32) void {
+        inline fn checkInvalid(offset: OffsetIndex) void {
             if (comptime invalid) |v| {
-                const enum_index: Index = @enumFromInt(index);
-                std.debug.assert(enum_index != v);
+                std.debug.assert(offset != v);
             }
         }
 
@@ -118,14 +129,14 @@ pub fn SectionIndexedStore(comptime Value: type, comptime Index: type) type {
                 store.items.deinit(allocator);
             }
 
-            pub inline fn get(store: Self.Mutable, base: Index, offset: Index) Value {
+            pub inline fn get(store: Self.Mutable, base: BaseIndex, offset: OffsetIndex) Value {
+                checkInvalid(offset);
                 const index = @intFromEnum(base) + @intFromEnum(offset);
-                checkInvalid(index);
                 return store.items.items[index];
             }
-            pub inline fn getPtr(store: Self.Mutable, base: Index, offset: Index) *Value {
+            pub inline fn getPtr(store: Self.Mutable, base: BaseIndex, offset: OffsetIndex) *Value {
+                checkInvalid(offset);
                 const index = @intFromEnum(base) + @intFromEnum(offset);
-                checkInvalid(index);
                 return &store.items.items[index];
             }
 
@@ -133,16 +144,20 @@ pub fn SectionIndexedStore(comptime Value: type, comptime Index: type) type {
                 return @intCast(store.items.items.len);
             }
 
-            pub fn append(store: *Self.Mutable, allocator: std.mem.Allocator, base: Index, value: Value) !Index {
+            pub fn append(store: *Self.Mutable, allocator: std.mem.Allocator, base: BaseIndex, value: Value) !OffsetIndex {
                 const i = store.items.items.len;
                 try store.items.append(allocator, value);
-                return @enumFromInt(i - @intFromEnum(base));
+                const offset: OffsetIndex = @enumFromInt(i - @intFromEnum(base));
+                checkInvalid(offset);
+                return offset;
             }
 
-            pub fn appendUndefined(store: *Self.Mutable, allocator: std.mem.Allocator, base: Index) !Index {
+            pub fn appendUndefined(store: *Self.Mutable, allocator: std.mem.Allocator, base: BaseIndex) !OffsetIndex {
                 const i = store.items.items.len;
                 _ = try store.items.addOne(allocator);
-                return @enumFromInt(i - @intFromEnum(base));
+                const offset: OffsetIndex = @enumFromInt(i - @intFromEnum(base));
+                checkInvalid(offset);
+                return offset;
             }
 
             pub fn popLast(store: *Self.Mutable) void {
@@ -160,19 +175,19 @@ pub fn SectionIndexedStore(comptime Value: type, comptime Index: type) type {
     };
 }
 
-fn checkIndexType(comptime Index: type) ?Index {
+fn checkIndexType(comptime name: []const u8, comptime Index: type) ?Index {
     const ii = @typeInfo(Index);
     if (ii != .Enum) {
-        @compileError("Index must be an enum type");
+        @compileError(name ++ " must be an enum type");
     }
     if (ii.Enum.is_exhaustive) {
-        @compileError("Index must not be exhaustive");
+        @compileError(name ++ " must not be exhaustive");
     }
     if (ii.Enum.fields.len > 1) {
-        @compileError(std.fmt.comptimePrint("Index must have zero or one defined fields, has {}", .{ii.Enum.fields.len}));
+        @compileError(std.fmt.comptimePrint(name ++ " must have zero or one defined fields, has {}", .{ii.Enum.fields.len}));
     }
     if (ii.Enum.fields.len == 1 and ii.Enum.fields[0].value != std.math.maxInt(ii.Enum.tag_type)) {
-        @compileError("Index's field must be the max value of its tag");
+        @compileError(name ++ "'s field must be the max value of its tag");
     }
 
     if (ii.Enum.fields.len == 0) {

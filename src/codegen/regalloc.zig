@@ -15,8 +15,8 @@ pub const VirtualRegister = enum(u32) {
 pub fn virtualAlloc(
     allocator: std.mem.Allocator,
     func: ssa.Function,
-) !util.SectionIndexedStore(VirtualRegister, ssa.Instruction.Ref) {
-    var regs: util.SectionIndexedStore(VirtualRegister, ssa.Instruction.Ref).Mutable = .{};
+) !ssa.InstructionStore(VirtualRegister) {
+    var regs: ssa.InstructionStore(VirtualRegister).Mutable = .{};
     errdefer regs.deinit(allocator);
     try regs.resize(allocator, func.insns.count());
 
@@ -134,7 +134,7 @@ const Jump = struct {
     from: ssa.Block.Ref,
 
     // Get the arguments passed from the jump source
-    fn args(j: Jump, blocks: util.IndexedStore(ssa.Block, ssa.Block.Ref)) []const ssa.Instruction.Ref {
+    fn args(j: Jump, blocks: util.IndexedStore(ssa.Block.Ref, ssa.Block)) []const ssa.Instruction.Ref {
         if (j.from == .invalid) return &.{};
         switch (blocks.get(j.from).term) {
             .ret => return &.{},

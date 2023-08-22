@@ -71,8 +71,8 @@ pub const Instruction = union(enum) {
         }
     }
 
-    pub const Ref = enum(u32) {
-        invalid = std.math.maxInt(u32),
+    pub const Ref = enum(u16) {
+        invalid = std.math.maxInt(u16),
         _,
 
         pub fn format(ref: Ref, _: []const u8, _: std.fmt.FormatOptions, w: anytype) !void {
@@ -86,10 +86,12 @@ pub const Instruction = union(enum) {
 };
 
 pub const Block = struct {
-    start: Instruction.Ref,
+    start: Start,
     count: u32,
 
     term: Terminal,
+
+    pub const Start = enum(u32) { _ };
 
     pub const Terminal = union(enum) {
         ret: Instruction.Ref,
@@ -141,8 +143,8 @@ pub const Block = struct {
         }
     };
 
-    pub const Ref = enum(u32) {
-        invalid = std.math.maxInt(u32),
+    pub const Ref = enum(u16) {
+        invalid = std.math.maxInt(u16),
         _,
 
         pub fn format(ref: Ref, _: []const u8, _: std.fmt.FormatOptions, w: anytype) !void {
@@ -154,19 +156,19 @@ pub const Block = struct {
         }
     };
 
-    pub fn insns(blk: Block, i: util.SectionIndexedStore(Instruction, Instruction.Ref)) []const Instruction {
+    pub fn insns(blk: Block, i: InstructionStore(Instruction)) []const Instruction {
         return i.items[@intFromEnum(blk.start)..][0..blk.count];
     }
-    pub fn types(blk: Block, t: util.SectionIndexedStore(Type, Instruction.Ref)) []const Type {
+    pub fn types(blk: Block, t: InstructionStore(Type)) []const Type {
         return t.items[@intFromEnum(blk.start)..][0..blk.count];
     }
 };
 
 pub const Function = struct {
     arena: std.heap.ArenaAllocator.State,
-    insns: util.SectionIndexedStore(Instruction, Instruction.Ref),
-    types: util.SectionIndexedStore(Type, Instruction.Ref),
-    blocks: util.IndexedStore(Block, Block.Ref),
+    insns: InstructionStore(Instruction),
+    types: InstructionStore(Type),
+    blocks: util.IndexedStore(Block.Ref, Block),
 
     pub fn deinit(func: Function, allocator: std.mem.Allocator) void {
         func.insns.deinit(allocator);
@@ -270,9 +272,9 @@ pub const Type = enum {
 
 pub const Builder = struct {
     arena: std.heap.ArenaAllocator,
-    insns: util.SectionIndexedStore(Instruction, Instruction.Ref).Mutable = .{},
-    types: util.SectionIndexedStore(Type, Instruction.Ref).Mutable = .{},
-    blocks: util.IndexedStore(Block, Block.Ref).Mutable = .{},
+    insns: InstructionStore(Instruction).Mutable = .{},
+    types: InstructionStore(Type).Mutable = .{},
+    blocks: util.IndexedStore(Block.Ref, Block).Mutable = .{},
     current_block: Block.Ref = .invalid, // Used to ensure blocks are constructed one at a time
     unfinished_blocks: u32 = 0,
 
@@ -480,6 +482,10 @@ pub const Builder = struct {
         }
     };
 };
+
+pub fn InstructionStore(comptime Value: type) type {
+    return util.SectionIndexedStore(Block.Start, Instruction.Ref, Value);
+}
 
 comptime {
     std.testing.refAllDecls(@This());
