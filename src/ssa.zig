@@ -1,6 +1,7 @@
 //! High-level SSA IR
 const std = @import("std");
 const util = @import("util");
+pub const dce = @import("ssa/dce.zig");
 pub const parse = @import("ssa/parse.zig").parse;
 pub const liveness = @import("ssa/liveness.zig");
 
@@ -104,12 +105,12 @@ pub const Instruction = union(enum) {
             live: Liveness,
 
             pub fn format(fmt: @This(), _: []const u8, _: std.fmt.FormatOptions, w: anytype) !void {
-                try w.print("{s} ", .{@tagName(fmt.insn)});
+                try w.print("{s}", .{@tagName(fmt.insn)});
                 switch (fmt.insn) {
-                    .i_const => |v| try w.print("{}", .{v}),
+                    .i_const => |v| try w.print(" {}", .{v}),
 
                     .call => |call| {
-                        try w.print("{s}(", .{call.name});
+                        try w.print(" {s}(", .{call.name});
                         for (call.args, 0..) |arg, i| {
                             if (i > 0) {
                                 try w.writeAll(", ");
@@ -121,9 +122,9 @@ pub const Instruction = union(enum) {
 
                     else => for (0..fmt.insn.arity()) |i| {
                         if (i > 0) {
-                            try w.writeAll(", ");
+                            try w.writeAll(",");
                         }
-                        try w.print("{}{}", .{ fmt.insn.operand(i), fmtDeath(fmt.live.operandDies(i)) });
+                        try w.print(" {}{}", .{ fmt.insn.operand(i), fmtDeath(fmt.live.operandDies(i)) });
                     },
                 }
             }

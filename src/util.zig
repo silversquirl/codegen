@@ -19,7 +19,7 @@ pub fn IndexedStore(comptime IndexEnum: type, comptime ValueType: type) type {
             checkInvalid(index);
             return store.items[@intFromEnum(index)];
         }
-        pub inline fn getPtr(store: Self, index: Index) *const Value {
+        pub fn getPtr(store: Self, index: Index) *const Value {
             checkInvalid(index);
             return &store.items[@intFromEnum(index)];
         }
@@ -41,11 +41,11 @@ pub fn IndexedStore(comptime IndexEnum: type, comptime ValueType: type) type {
                 store.items.deinit(allocator);
             }
 
-            pub inline fn get(store: Self.Mutable, index: Index) Value {
+            pub fn get(store: Self.Mutable, index: Index) Value {
                 checkInvalid(index);
                 return store.items.items[@intFromEnum(index)];
             }
-            pub inline fn getPtr(store: Self.Mutable, index: Index) *Value {
+            pub fn getPtr(store: Self.Mutable, index: Index) *Value {
                 checkInvalid(index);
                 return &store.items.items[@intFromEnum(index)];
             }
@@ -113,7 +113,7 @@ pub fn SectionIndexedStore(comptime BaseIndexEnum: type, comptime OffsetIndexEnu
             const index = @intFromEnum(base) + @intFromEnum(offset);
             return store.items[index];
         }
-        pub inline fn getPtr(store: Self, base: BaseIndex, offset: OffsetIndex) *const Value {
+        pub fn getPtr(store: Self, base: BaseIndex, offset: OffsetIndex) *const Value {
             checkInvalid(offset);
             const index = @intFromEnum(base) + @intFromEnum(offset);
             return &store.items[index];
@@ -136,12 +136,12 @@ pub fn SectionIndexedStore(comptime BaseIndexEnum: type, comptime OffsetIndexEnu
                 store.items.deinit(allocator);
             }
 
-            pub inline fn get(store: Self.Mutable, base: BaseIndex, offset: OffsetIndex) Value {
+            pub fn get(store: Self.Mutable, base: BaseIndex, offset: OffsetIndex) Value {
                 checkInvalid(offset);
                 const index = @intFromEnum(base) + @intFromEnum(offset);
                 return store.items.items[index];
             }
-            pub inline fn getPtr(store: Self.Mutable, base: BaseIndex, offset: OffsetIndex) *Value {
+            pub fn getPtr(store: Self.Mutable, base: BaseIndex, offset: OffsetIndex) *Value {
                 checkInvalid(offset);
                 const index = @intFromEnum(base) + @intFromEnum(offset);
                 return &store.items.items[index];

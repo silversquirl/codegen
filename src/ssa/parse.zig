@@ -2,6 +2,8 @@
 const std = @import("std");
 const ssa = @import("../ssa.zig");
 
+const log = std.log.scoped(.ssa_parser);
+
 pub fn parse(allocator: std.mem.Allocator, src: []const u8) !ssa.Function {
     var p = Parser{
         .b = ssa.Builder.init(allocator),
@@ -317,6 +319,7 @@ const Parser = struct {
     fn exact(p: *Parser, tag: Token.Tag) ![]const u8 {
         const tok = try p.next();
         if (tok.tag != tag) {
+            log.err("expected {s} token, got {s}", .{ @tagName(tag), @tagName(tok.tag) });
             return error.Parse;
         }
         return tok.text;
