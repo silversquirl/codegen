@@ -10,7 +10,7 @@ pub fn compile(
     allocator: std.mem.Allocator,
     code_allocator: std.mem.Allocator,
     func: ssa.Function,
-    liveness: ssa.liveness.LivenessInfo,
+    liveness: ssa.liveness.Info,
 ) ![]const u8 {
     var comp = try Compiler.init(allocator, func, liveness);
     defer comp.deinit();
@@ -40,7 +40,7 @@ pub fn compile(
 const Compiler = struct {
     allocator: std.mem.Allocator,
     func: ssa.Function,
-    liveness: ssa.liveness.LivenessInfo,
+    liveness: ssa.liveness.Info,
     labels: util.IndexedStore(ssa.Block.Ref, u32).Mutable = .{},
     // one less because x0 cannot be allocated (it is always zero)
     register_lifetimes: [nreg - 1]ssa.Instruction.Ref = .{.invalid} ** (nreg - 1),
@@ -48,7 +48,7 @@ const Compiler = struct {
 
     const nreg = std.enums.values(rv64.Register).len;
 
-    fn init(allocator: std.mem.Allocator, func: ssa.Function, liveness: ssa.liveness.LivenessInfo) !Compiler {
+    fn init(allocator: std.mem.Allocator, func: ssa.Function, liveness: ssa.liveness.Info) !Compiler {
         var comp: Compiler = .{
             .allocator = allocator,
             .func = func,

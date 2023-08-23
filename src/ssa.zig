@@ -25,26 +25,11 @@ pub const Instruction = union(enum) {
     pub const Binary = struct {
         lhs: Ref,
         rhs: Ref,
-
-        pub fn format(op: Binary, _: []const u8, _: std.fmt.FormatOptions, w: anytype) !void {
-            try w.print("{}, {}", .{ op.lhs, op.rhs });
-        }
     };
 
     pub const Call = struct {
         name: []const u8,
         args: []const Ref,
-
-        pub fn format(call: Call, _: []const u8, _: std.fmt.FormatOptions, w: anytype) !void {
-            try w.print("{s}(", .{call.name});
-            for (call.args, 0..) |arg, i| {
-                if (i > 0) {
-                    try w.writeAll(", ");
-                }
-                try w.print("{}", .{arg});
-            }
-            try w.writeAll(")");
-        }
 
         fn clone(call: Call, allocator: std.mem.Allocator) !*Call {
             const name = try allocator.dupe(u8, call.name);
@@ -63,12 +48,39 @@ pub const Instruction = union(enum) {
         }
     };
 
-    pub fn format(insn: Instruction, _: []const u8, _: std.fmt.FormatOptions, w: anytype) !void {
-        switch (insn) {
-            inline else => |operands, name| {
-                try w.print("{s} {}", .{ @tagName(name), operands });
+    pub fn arity(insn: Instruction) usize {
+        return switch (insn) {
+            .param, .i_const => 0,
+            .call => |call| call.args.len,
+            inline else => |i| switch (@TypeOf(i)) {
+                Binary => 2,
+                else => |t| @compileError("Unknown instruction type " ++ @typeName(t)),
             },
-        }
+        };
+    }
+
+    pub fn operand(insn: Instruction, idx: usize) Ref {
+        return switch (insn) {
+            .param, .i_const => unreachable,
+            .call => |call| call.args[idx],
+
+            inline else => |i| switch (@TypeOf(i)) {
+                Binary => switch (idx) {
+                    0 => i.lhs,
+                    1 => i.rhs,
+                    else => unreachable,
+                },
+
+                else => |t| @compileError("Unknown instruction type " ++ @typeName(t)),
+            },
+        };
+    }
+
+    pub fn format(insn: Instruction, comptime fmt: []const u8, opts: std.fmt.FormatOptions, w: anytype) !void {
+        try insn.fmtWithLiveness(FakeLiveness.Single{}).format(fmt, opts, w);
+    }
+    pub fn fmtWithLiveness(insn: Instruction, live: anytype) Formatter(@TypeOf(live)) {
+        return .{ .insn = insn, .live = live };
     }
 
     pub const Ref = enum(u16) {
@@ -83,6 +95,38 @@ pub const Instruction = union(enum) {
             }
         }
     };
+
+    pub fn Formatter(comptime Liveness: type) type {
+        return struct {
+            insn: Instruction,
+            live: Liveness,
+
+            pub fn format(fmt: @This(), _: []const u8, _: std.fmt.FormatOptions, w: anytype) !void {
+                try w.print("{s} ", .{@tagName(fmt.insn)});
+                switch (fmt.insn) {
+                    .i_const => |v| try w.print("{}", .{v}),
+
+                    .call => |call| {
+                        try w.print("{s}(", .{call.name});
+                        for (call.args, 0..) |arg, i| {
+                            if (i > 0) {
+                                try w.writeAll(", ");
+                            }
+                            try w.print("{}{}", .{ arg, fmtDeath(fmt.live.operandDies(i)) });
+                        }
+                        try w.writeAll(")");
+                    },
+
+                    else => for (0..fmt.insn.arity()) |i| {
+                        if (i > 0) {
+                            try w.writeAll(", ");
+                        }
+                        try w.print("{}{}", .{ fmt.insn.operand(i), fmtDeath(fmt.live.operandDies(i)) });
+                    },
+                }
+            }
+        };
+    }
 };
 
 pub const Block = struct {
@@ -191,16 +235,24 @@ pub const Function = struct {
             annotations: AnnotationsTuple,
 
             pub fn format(fmt: @This(), _: []const u8, _: std.fmt.FormatOptions, w: anytype) !void {
+                const live = inline for (fmt.annotations) |annot| {
+                    if (@TypeOf(annot) == liveness.Info) {
+                        break annot;
+                    }
+                } else FakeLiveness{};
+
                 for (fmt.func.blocks.items, 0..) |blk, blk_i| {
                     try w.print("@{}(", .{blk_i});
-                    if (fmt.annotations.len > 0) {
+                    if (fmt.annotations.len > 0 and blk.insns(fmt.func.insns)[0] == .param) {
                         try w.writeAll("\n");
                     }
 
                     var params = true;
                     for (blk.insns(fmt.func.insns), blk.types(fmt.func.types), 0..) |insn, ty, insn_i| {
                         const insn_ref: Instruction.Ref = @enumFromInt(insn_i);
+                        const insn_live = live.single(fmt.func.insns, blk.start, insn_ref);
 
+                        // Handle parameters
                         if (insn == .param) {
                             std.debug.assert(params);
                             if (fmt.annotations.len == 0) {
@@ -208,10 +260,15 @@ pub const Function = struct {
                             } else {
                                 try w.writeAll("    ");
                             }
-                            try w.print("{}: {}", .{ insn_ref, ty });
+                            try w.print("{}{}: {}", .{ insn_ref, fmtDeath(insn_live.diesImmediately()), ty });
+
                             inline for (fmt.annotations) |annot| {
-                                try w.print("    {}", .{annot.get(blk.start, insn_ref)});
+                                const A = @TypeOf(annot);
+                                if (@hasDecl(A, "OffsetIndex") and A.OffsetIndex == Instruction.Ref) {
+                                    try w.print("    {}", .{annot.get(blk.start, insn_ref)});
+                                }
                             }
+
                             if (fmt.annotations.len > 0) {
                                 try w.writeAll("\n");
                             }
@@ -221,10 +278,21 @@ pub const Function = struct {
                             params = false;
                         }
 
-                        try w.print("  {}: {} = {}", .{ insn_ref, ty, insn });
+                        // Print instruction
+                        try w.print("  {}{}: {} = {}", .{
+                            insn_ref,
+                            fmtDeath(insn_live.diesImmediately()),
+                            ty,
+                            insn.fmtWithLiveness(insn_live),
+                        });
+
                         inline for (fmt.annotations) |annot| {
-                            try w.print("    {}", .{annot.get(blk.start, insn_ref)});
+                            const A = @TypeOf(annot);
+                            if (@hasDecl(A, "OffsetIndex") and A.OffsetIndex == Instruction.Ref) {
+                                try w.print("    {}", .{annot.get(blk.start, insn_ref)});
+                            }
                         }
+
                         try w.writeAll("\n");
                     }
                     if (params) {
@@ -485,6 +553,37 @@ pub const Builder = struct {
 
 pub fn InstructionStore(comptime Value: type) type {
     return util.SectionIndexedStore(Block.Start, Instruction.Ref, Value);
+}
+
+/// Used in formatting when liveness is unavailable, returns "no deaths" for every query
+const FakeLiveness = struct {
+    inline fn diesImmediately(_: FakeLiveness, _: Block.Start, _: Instruction.Ref) bool {
+        return false;
+    }
+    inline fn operandDies(_: FakeLiveness, _: Block.Start, _: Instruction.Ref, _: usize) bool {
+        return false;
+    }
+    inline fn single(_: FakeLiveness, _: InstructionStore(Instruction), _: Block.Start, _: Instruction.Ref) Single {
+        return .{};
+    }
+
+    const Single = struct {
+        inline fn diesImmediately(_: Single) bool {
+            return false;
+        }
+        inline fn operandDies(_: Single, _: usize) bool {
+            return false;
+        }
+    };
+};
+
+fn fmtDeath(dies: bool) std.fmt.Formatter(formatDeath) {
+    return .{ .data = dies };
+}
+fn formatDeath(dies: bool, _: []const u8, _: std.fmt.FormatOptions, w: anytype) !void {
+    if (dies) {
+        try w.writeAll("!");
+    }
 }
 
 comptime {

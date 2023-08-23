@@ -3,71 +3,220 @@ const std = @import("std");
 const util = @import("util");
 const ssa = @import("../ssa.zig");
 
-pub const LivenessInfo = util.IndexedStore(ssa.Instruction.Ref, ssa.Instruction.Ref);
+pub const Info = struct {
+    small: ssa.InstructionStore(Small),
+    large: LargeMap,
 
-pub fn analyze(allocator: std.mem.Allocator, func: ssa.Function) !LivenessInfo {
-    var ana = Analyzer{
-        .func = func,
+    pub const Small = std.bit_set.IntegerBitSet(8);
+    pub const Large = std.DynamicBitSetUnmanaged;
+    const LargeMap = std.ArrayHashMapUnmanaged(
+        ScopedInsnRef,
+        Large,
+        std.array_hash_map.AutoContext(ScopedInsnRef),
+        false,
+    );
+
+    const ScopedInsnRef = packed struct {
+        base: ssa.Block.Start,
+        insn: ssa.Instruction.Ref,
     };
-    errdefer ana.liveness.deinit(allocator);
 
-    try ana.liveness.resize(allocator, func.insns.count());
-    @memset(ana.liveness.items.items, .invalid);
-
-    // TODO: properly handle loops
-    // Anything that comes from outside a loop and is referenced within the loop must exist until the end of the loop, rather than simply its last reference within the loop
-    for (0..func.blocks.count()) |blk_idx| {
-        try ana.block(@enumFromInt(blk_idx));
+    comptime {
+        std.debug.assert(@sizeOf(Small) == 1);
     }
 
-    return ana.liveness.toConst(allocator);
-}
-
-const Analyzer = struct {
-    func: ssa.Function,
-    liveness: LivenessInfo.Mutable = .{},
-
-    fn block(ana: Analyzer, blk_ref: ssa.Block.Ref) !void {
-        const blk = ana.func.blocks.getPtr(blk_ref);
-
-        for (blk.insns(ana.func.insns), @intFromEnum(blk.start)..) |insn, insn_idx| {
-            const ref: ssa.Instruction.Ref = @enumFromInt(insn_idx);
-            switch (insn) {
-                .i_const => {},
-
-                .call => |call| for (call.args) |arg| {
-                    ana.updateRef(arg, ref);
-                },
-
-                inline else => |value, name| switch (@TypeOf(value)) {
-                    void => {},
-
-                    ssa.Instruction.Ref => ana.updateRef(value, ref),
-                    ssa.Instruction.Binary => {
-                        ana.updateRef(value.lhs, ref);
-                        ana.updateRef(value.rhs, ref);
-                    },
-
-                    else => @compileError("Cannot handle instruction " ++ @tagName(name) ++ " of type " ++ @typeName(@TypeOf(value))),
-                },
-            }
+    pub fn deinit(liveness: Info, allocator: std.mem.Allocator) void {
+        liveness.small.deinit(allocator);
+        for (liveness.large.values()) |*l| {
+            l.deinit(allocator);
         }
+        var large = liveness.large;
+        large.deinit(allocator);
+    }
 
-        const end: ssa.Instruction.Ref = @enumFromInt(@intFromEnum(blk.start) + blk.count);
-        switch (blk.term) {
-            .ret => |value| ana.updateRef(value, end),
-            .jump => {},
-            .branch => |branch| ana.updateRef(branch.cond, end),
+    pub fn diesImmediately(
+        liveness: Info,
+        base: ssa.Block.Start,
+        insn_ref: ssa.Instruction.Ref,
+    ) bool {
+        return liveness.small.get(base, insn_ref).isSet(0);
+    }
+
+    pub fn operandDies(
+        liveness: Info,
+        base: ssa.Block.Start,
+        insn_ref: ssa.Instruction.Ref,
+        operand: usize,
+    ) bool {
+        const idx = operand + 1;
+        if (idx < Small.bit_length) {
+            return liveness.small.get(base, insn_ref).isSet(operand + 1);
+        } else {
+            return liveness.large.get(.{ .base = base, .insn = insn_ref }).?.isSet(operand + 1 - Small.bit_length);
         }
     }
 
-    fn updateRef(ana: Analyzer, value: ssa.Instruction.Ref, usage: ssa.Instruction.Ref) void {
-        const ln = ana.liveness.getPtr(value);
-        if (ln.* == .invalid or @intFromEnum(ln.*) < @intFromEnum(usage)) {
-            ln.* = usage;
+    pub fn single(
+        liveness: Info,
+        insns: ssa.InstructionStore(ssa.Instruction),
+        base: ssa.Block.Start,
+        insn_ref: ssa.Instruction.Ref,
+    ) Single {
+        return .{
+            .small = liveness.small.get(base, insn_ref),
+            .large = if (insns.get(base, insn_ref).arity() < Small.bit_length)
+                undefined
+            else
+                liveness.large.get(.{ .base = base, .insn = insn_ref }).?,
+        };
+    }
+
+    pub fn operandDeaths(
+        liveness: Info,
+        insns: ssa.InstructionStore(ssa.Instruction),
+        base: ssa.Block.Start,
+        insn_ref: ssa.Instruction.Ref,
+    ) OperandDeathIterator {
+        const insn = insns.get(base, insn_ref);
+        const small = liveness.small.get(base, insn_ref).iterator(.{});
+        const large = if (insn.arity() < small.capacity())
+            undefined
+        else
+            liveness.large.get(.{ .base = base, .insn = insn_ref }).?.iterator(.{});
+        return .{
+            .insn = insn,
+            .small = small,
+            .large = large,
+        };
+    }
+};
+
+// Liveness record for a single instruction
+pub const Single = struct {
+    small: Info.Small,
+    large: Info.Large,
+
+    pub fn diesImmediately(liveness: Single) bool {
+        return liveness.small.isSet(0);
+    }
+
+    pub fn operandDies(liveness: Single, operand: usize) bool {
+        const idx = operand + 1;
+        if (idx < Info.Small.bit_length) {
+            return liveness.small.isSet(operand + 1);
+        } else {
+            return liveness.large.isSet(operand + 1 - Info.Small.bit_length);
         }
     }
 };
+
+pub const OperandDeathIterator = struct {
+    insn: ssa.Instruction,
+    small: Info.Small.Iterator(.{}),
+    large: Info.Large.Iterator(.{}), // undefined if insn.arity() < Info.Small.bit_length
+
+    pub fn next(it: *OperandDeathIterator) ?ssa.Instruction.Ref {
+        const operand =
+            it.small.next() orelse
+            it.large.next() orelse
+            return null;
+        return it.insn.operand(operand);
+    }
+};
+
+pub fn analyze(allocator: std.mem.Allocator, func: ssa.Function) !Info {
+    var small: ssa.InstructionStore(Info.Small).Mutable = .{};
+    errdefer small.deinit(allocator);
+    try small.resize(allocator, func.insns.count());
+
+    var large: Info.LargeMap = .{};
+    errdefer {
+        for (large.values()) |*l| {
+            l.deinit(allocator);
+        }
+        large.deinit(allocator);
+    }
+
+    var alive = try std.DynamicBitSet.initEmpty(allocator, 256);
+    defer alive.deinit();
+
+    for (func.blocks.items) |blk| {
+        alive.setRangeValue(.{ .start = 0, .end = alive.capacity() }, false);
+        if (blk.count > alive.capacity()) {
+            try alive.resize(alive.capacity() + alive.capacity() / 2, false);
+        }
+
+        switch (blk.term) {
+            .ret => |t| alive.set(@intFromEnum(t)),
+
+            .jump => |t| {
+                var i: usize = 0;
+                while (t.args[i] != .invalid) : (i += 1) {
+                    alive.set(@intFromEnum(t.args[i]));
+                }
+            },
+
+            .branch => |t| {
+                alive.set(@intFromEnum(t.cond));
+                var i: usize = 0;
+                while (t.args[i] != .invalid) : (i += 1) {
+                    alive.set(@intFromEnum(t.args[i]));
+                }
+                i += 1;
+                while (t.args[i] != .invalid) : (i += 1) {
+                    alive.set(@intFromEnum(t.args[i]));
+                }
+            },
+        }
+
+        var insn_idx: u32 = blk.count;
+        while (insn_idx > 0) {
+            insn_idx -= 1;
+            const insn_ref: ssa.Instruction.Ref = @enumFromInt(insn_idx);
+            const insn = func.insns.get(blk.start, insn_ref);
+
+            // Slots for all operands, plus one for the result temporary
+            const slot_count = insn.arity() + 1;
+
+            // Set small death record
+            {
+                const s = small.getPtr(blk.start, insn_ref);
+                s.* = Info.Small.initEmpty();
+                if (!alive.isSet(insn_idx)) {
+                    s.set(0); // Dies immediately
+                }
+
+                for (1..@min(s.capacity(), slot_count)) |idx| {
+                    const operand_idx = @intFromEnum(insn.operand(idx - 1));
+                    if (!alive.isSet(operand_idx)) {
+                        alive.set(operand_idx);
+                        s.set(idx);
+                    }
+                }
+            }
+
+            // If there's more operands, create a large death record as well
+            if (slot_count > Info.Small.bit_length) {
+                var l = try Info.Large.initEmpty(allocator, slot_count - Info.Small.bit_length);
+
+                for (Info.Small.bit_length..slot_count) |idx| {
+                    const operand_idx = @intFromEnum(insn.operand(idx - 1));
+                    if (!alive.isSet(operand_idx)) {
+                        alive.set(operand_idx);
+                        l.set(idx);
+                    }
+                }
+
+                try large.put(allocator, .{ .base = blk.start, .insn = insn_ref }, l);
+            }
+        }
+    }
+
+    return .{
+        .small = try small.toConst(allocator),
+        .large = large,
+    };
+}
 
 test "convoluted" {
     var b = ssa.Builder.init(std.testing.allocator);
@@ -116,6 +265,9 @@ test "convoluted" {
         .rhs = c_3,
     } });
     const c_0 = try blk2.i(.u32, .{ .i_const = 0 });
+
+    const c_1337 = try blk2.i(.u32, .{ .i_const = 1337 });
+    _ = c_1337;
 
     var t2 = try blk2.jump();
     defer t2.deinit();
@@ -192,42 +344,59 @@ test "convoluted" {
 
     const func = try b.finish();
     defer func.deinit(std.testing.allocator);
+
+    const live = try analyze(std.testing.allocator, func);
+    defer live.deinit(std.testing.allocator);
+
     try std.testing.expectFmt(
         \\@0():
         \\  %0: u32 = i_const 7
         \\  %1: u32 = i_const 13
-        \\  %2: u32 = add %0, %1
+        \\  %2: u32 = add %0!, %1!
         \\  %3: u32 = i_const 20
-        \\  %4: bool = lt %2, %3
+        \\  %4: bool = lt %2, %3!
         \\  branch %4, @1(%2), @2(%2)
-        \\@1(%0: u32):
-        \\  %1: u32 = call add2(%0)
+        \\@1(
+        \\    %0: u32
+        \\):
+        \\  %1: u32 = call add2(%0!)
         \\  jump @2(%1)
-        \\@2(%0: u32):
+        \\@2(
+        \\    %0: u32
+        \\):
         \\  %1: u32 = i_const 3
-        \\  %2: u32 = add %0, %1
+        \\  %2: u32 = add %0!, %1!
         \\  %3: u32 = i_const 0
+        \\  %4!: u32 = i_const 1337
         \\  jump @3(%2, %3)
-        \\@3(%0: u32, %1: u32):
+        \\@3(
+        \\    %0: u32
+        \\    %1: u32
+        \\):
         \\  %2: u32 = i_const 1
-        \\  %3: u32 = add %0, %2
+        \\  %3: u32 = add %0!, %2!
         \\  %4: u32 = i_const 5
-        \\  %5: u32 = mul %1, %4
+        \\  %5: u32 = mul %1!, %4!
         \\  %6: u32 = i_const 10
-        \\  %7: bool = lt %3, %6
+        \\  %7: bool = lt %3, %6!
         \\  branch %7, @4(%3, %5), @5(%5)
-        \\@4(%0: u32, %1: u32):
+        \\@4(
+        \\    %0: u32
+        \\    %1: u32
+        \\):
         \\  %2: u32 = i_const 500
-        \\  %3: bool = lt %1, %2
+        \\  %3: bool = lt %1, %2!
         \\  branch %3, @3(%0, %1), @6(%1)
-        \\@5(%0: u32):
+        \\@5(
+        \\    %0: u32
+        \\):
         \\  ret %0
-        \\@6(%0: u32):
+        \\@6(
+        \\    %0: u32
+        \\):
         \\  %1: u32 = i_const 5
-        \\  %2: u32 = div %0, %1
+        \\  %2: u32 = div %0!, %1!
         \\  jump @5(%2)
         \\
-    , "{}", .{func});
-
-    // TODO: check liveness data
+    , "{}", .{func.fmtWithAnnotations(.{live})});
 }

@@ -1,10 +1,13 @@
 //! General utilities for data-oriented design, etc
 const std = @import("std");
 
-pub fn IndexedStore(comptime Index: type, comptime Value: type) type {
-    const invalid = checkIndexType("Index", Index);
+pub fn IndexedStore(comptime IndexEnum: type, comptime ValueType: type) type {
+    const invalid = checkIndexType("Index", IndexEnum);
     return struct {
         items: []const Value,
+
+        pub const Index = IndexEnum;
+        pub const Value = ValueType;
 
         const Self = @This();
 
@@ -78,8 +81,8 @@ pub fn IndexedStore(comptime Index: type, comptime Value: type) type {
     };
 }
 
-pub fn SectionIndexedStore(comptime BaseIndex: type, comptime OffsetIndex: type, comptime Value: type) type {
-    const bi = @typeInfo(BaseIndex);
+pub fn SectionIndexedStore(comptime BaseIndexEnum: type, comptime OffsetIndexEnum: type, comptime ValueType: type) type {
+    const bi = @typeInfo(BaseIndexEnum);
     if (bi != .Enum) {
         @compileError("BaseIndex must be an enum type");
     }
@@ -90,10 +93,14 @@ pub fn SectionIndexedStore(comptime BaseIndex: type, comptime OffsetIndex: type,
         @compileError("BaseIndex must have no fields");
     }
 
-    const invalid = checkIndexType("OffsetIndex", OffsetIndex);
+    const invalid = checkIndexType("OffsetIndex", OffsetIndexEnum);
 
     return struct {
         items: []const Value,
+
+        pub const BaseIndex = BaseIndexEnum;
+        pub const OffsetIndex = OffsetIndexEnum;
+        pub const Value = ValueType;
 
         const Self = @This();
 
