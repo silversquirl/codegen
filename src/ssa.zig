@@ -1,6 +1,7 @@
 //! High-level SSA IR
 const std = @import("std");
 const util = @import("util");
+pub const parse = @import("ssa/parse.zig").parse;
 pub const liveness = @import("ssa/liveness.zig");
 
 pub const Instruction = union(enum) {
