@@ -78,15 +78,13 @@ pub const Info = struct {
         insn_ref: ssa.Instruction.Ref,
     ) OperandDeathIterator {
         const insn = insns.get(base, insn_ref);
-        const small = liveness.small.get(base, insn_ref).iterator(.{});
-        const large = if (insn.arity() < small.capacity())
-            undefined
-        else
-            liveness.large.get(.{ .base = base, .insn = insn_ref }).?.iterator(.{});
         return .{
             .insn = insn,
-            .small = small,
-            .large = large,
+            .small = liveness.small.get(base, insn_ref).iterator(.{}),
+            .large = if (insn.arity() < Small.bit_length)
+                undefined
+            else
+                liveness.large.get(.{ .base = base, .insn = insn_ref }).?.iterator(.{}),
         };
     }
 };
@@ -116,11 +114,16 @@ pub const OperandDeathIterator = struct {
     large: Info.Large.Iterator(.{}), // undefined if insn.arity() < Info.Small.bit_length
 
     pub fn next(it: *OperandDeathIterator) ?ssa.Instruction.Ref {
-        const operand =
-            it.small.next() orelse
-            it.large.next() orelse
-            return null;
-        return it.insn.operand(operand);
+        if (it.small.next()) |idx| {
+            if (idx == 0) return it.next();
+            return it.insn.operand(idx - 1);
+        } else if (it.insn.arity() >= Info.Small.bit_length) {
+            if (it.large.next()) |i| {
+                const idx = i + Info.Small.bit_length;
+                return it.insn.operand(idx - 1);
+            }
+        }
+        return null;
     }
 };
 
@@ -186,7 +189,7 @@ pub fn analyze(allocator: std.mem.Allocator, func: ssa.Function) !Info {
                     s.set(0); // Dies immediately
                 }
 
-                for (1..@min(s.capacity(), slot_count)) |idx| {
+                for (1..@min(Info.Small.bit_length, slot_count)) |idx| {
                     const operand_idx = @intFromEnum(insn.operand(idx - 1));
                     if (!alive.isSet(operand_idx)) {
                         alive.set(operand_idx);

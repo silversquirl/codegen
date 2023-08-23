@@ -15,6 +15,7 @@ pub const VirtualRegister = enum(u32) {
 pub fn virtualAlloc(
     allocator: std.mem.Allocator,
     func: ssa.Function,
+    live: ssa.liveness.Info,
 ) !ssa.InstructionStore(VirtualRegister) {
     var regs: ssa.InstructionStore(VirtualRegister).Mutable = .{};
     errdefer regs.deinit(allocator);
@@ -51,8 +52,6 @@ pub fn virtualAlloc(
         const from = if (j.from == .invalid) undefined else func.blocks.get(j.from);
         const args = j.args(func.blocks);
 
-        reg_set.clearRetainingCapacity();
-
         // Track which temporaries are used as arguments to finished blocks called by this block
         // We can reuse their arguments' registers for these temporaries
         {
@@ -67,9 +66,19 @@ pub fn virtualAlloc(
         }
 
         // Allocate registers for all instructions
+        reg_set.clearRetainingCapacity();
         for (blk.insns(func.insns), 0..) |insn, insn_i| {
             const insn_ref: ssa.Instruction.Ref = @enumFromInt(insn_i);
             const reg = regs.getPtr(blk.start, insn_ref);
+
+            // Update register conflict set based on liveness
+            {
+                var it = live.operandDeaths(func.insns, blk.start, insn_ref);
+                while (it.next()) |dead_ref| {
+                    const dead_reg = regs.get(blk.start, dead_ref);
+                    _ = reg_set.remove(dead_reg);
+                }
+            }
 
             if (insn == .param and insn_i < args.len) {
                 // Attempt to reuse argument register
@@ -272,7 +281,10 @@ test "allocate virtual registers" {
     const func = try b.finish();
     defer func.deinit(std.testing.allocator);
 
-    const regs = try virtualAlloc(std.testing.allocator, func);
+    const live = try ssa.liveness.analyze(std.testing.allocator, func);
+    defer live.deinit(std.testing.allocator);
+
+    const regs = try virtualAlloc(std.testing.allocator, func, live);
     defer regs.deinit(std.testing.allocator);
 
     try std.testing.expectFmt(
@@ -281,7 +293,7 @@ test "allocate virtual registers" {
         \\    %1: u32    v$1
         \\):
         \\  %2: u32 = add %0, %1    v$2
-        \\  %3: u32 = mul %0, %1    v$3
+        \\  %3: u32 = mul %0!, %1    v$3
         \\  jump @1(%1, %2, %3)
         \\@1(
         \\    %0: u32    v$1
@@ -289,7 +301,7 @@ test "allocate virtual registers" {
         \\    %2: u32    v$3
         \\):
         \\  %3: u32 = i_const 0    v$4
-        \\  %4: bool = gt %2, %3    v$5
+        \\  %4: bool = gt %2, %3!    v$5
         \\  branch %4, @2(%0, %1, %2), @3(%2)
         \\@2(
         \\    %0: u32    v$1
@@ -297,15 +309,15 @@ test "allocate virtual registers" {
         \\    %2: u32    v$3
         \\):
         \\  %3: u32 = i_const 1    v$6
-        \\  %4: u32 = sub %1, %3    v$7
-        \\  %5: u32 = mul %2, %0    v$8
+        \\  %4: u32 = sub %1!, %3!    v$2
+        \\  %5: u32 = mul %2!, %0    v$3
         \\  jump @1(%0, %4, %5)
         \\@3(
         \\    %0: u32    v$3
         \\):
         \\  ret %0
         \\
-    , "{}", .{func.fmtWithAnnotations(.{regs})});
+    , "{}", .{func.fmtWithAnnotations(.{ regs, live })});
 }
 
 test "allocate virtual registers 2" {
@@ -348,7 +360,7 @@ test "allocate virtual registers 2" {
     try t2.addArg(blk2.arg(0));
     try t2.finish();
 
-    const blk3 = try b.block(&.{.u32});
+    const blk3 = try b.block(&.{ .u32, .u32 });
     t1.to(blk3.ref);
     try t1.addArg(blk1.arg(0));
     try t1.addArg(x1);
@@ -359,7 +371,10 @@ test "allocate virtual registers 2" {
     const func = try b.finish();
     defer func.deinit(std.testing.allocator);
 
-    const regs = try virtualAlloc(std.testing.allocator, func);
+    const live = try ssa.liveness.analyze(std.testing.allocator, func);
+    defer live.deinit(std.testing.allocator);
+
+    const regs = try virtualAlloc(std.testing.allocator, func, live);
     defer regs.deinit(std.testing.allocator);
 
     try std.testing.expectFmt(
@@ -374,18 +389,19 @@ test "allocate virtual registers 2" {
         \\    %1: u32    v$1
         \\):
         \\  %2: u32 = i_const 1    v$3
-        \\  %3: u32 = add %1, %2    v$4
+        \\  %3: u32 = add %1!, %2!    v$4
         \\  jump @3(%0, %3)
         \\@2(
         \\    %0: u32    v$0
         \\):
         \\  %1: u32 = i_const 1    v$5
-        \\  %2: u32 = add %0, %1    v$6
+        \\  %2: u32 = add %0, %1!    v$6
         \\  jump @1(%2, %0)
         \\@3(
         \\    %0: u32    v$0
+        \\    %1!: u32    v$4
         \\):
         \\  ret %0
         \\
-    , "{}", .{func.fmtWithAnnotations(.{regs})});
+    , "{}", .{func.fmtWithAnnotations(.{ regs, live })});
 }

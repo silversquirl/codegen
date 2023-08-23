@@ -55,13 +55,13 @@ pub fn build(b: *std.Build) void {
     ssa_tests.addModule("util", util_mod);
     test_step.dependOn(&b.addRunArtifact(ssa_tests).step);
 
-    // const codegen_tests = b.addTest(.{
-    //     .root_source_file = .{ .path = "src/codegen.zig" },
-    //     .target = target,
-    //     .optimize = optimize,
-    // });
-    // codegen_tests.addModule("util", util_mod);
-    // codegen_tests.addModule("asm", asm_mod);
-    // codegen_tests.addModule("ssa", ssa_mod);
-    // test_step.dependOn(&b.addRunArtifact(codegen_tests).step);
+    const codegen_tests = b.addTest(.{
+        .root_source_file = .{ .path = "src/codegen.zig" },
+        .target = target,
+        .optimize = optimize,
+    });
+    codegen_tests.addModule("util", util_mod);
+    codegen_tests.addModule("asm", asm_mod);
+    codegen_tests.addModule("ssa", ssa_mod);
+    test_step.dependOn(&b.addRunArtifact(codegen_tests).step);
 }
