@@ -158,6 +158,8 @@ const Parser = struct {
         switch (insn_tag) {
             .param => return error.InvalidInstruction,
 
+            .void => return blk.i(ty, .void),
+
             .i_const => {
                 const num_str = try p.exact(.number);
                 const num = try std.fmt.parseUnsigned(u64, num_str, 10);

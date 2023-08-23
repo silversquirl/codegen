@@ -7,6 +7,7 @@ pub const liveness = @import("ssa/liveness.zig");
 pub const Instruction = union(enum) {
     param: void,
 
+    void: void,
     i_const: u64,
 
     add: Binary,
@@ -51,7 +52,7 @@ pub const Instruction = union(enum) {
 
     pub fn arity(insn: Instruction) usize {
         return switch (insn) {
-            .param, .i_const => 0,
+            .param, .void, .i_const => 0,
             .call => |call| call.args.len,
             inline else => |i| switch (@TypeOf(i)) {
                 Binary => 2,
@@ -62,7 +63,7 @@ pub const Instruction = union(enum) {
 
     pub fn operand(insn: Instruction, idx: usize) Ref {
         return switch (insn) {
-            .param, .i_const => unreachable,
+            .param, .void, .i_const => unreachable,
             .call => |call| call.args[idx],
 
             inline else => |i| switch (@TypeOf(i)) {
@@ -307,6 +308,9 @@ pub const Function = struct {
 };
 
 pub const Type = enum {
+    void,
+    bool,
+
     // Unsigned integers
     u8,
     u16,
@@ -319,19 +323,19 @@ pub const Type = enum {
     s32,
     s64,
 
-    bool,
-
     pub fn kind(ty: Type) Kind {
         return switch (ty) {
+            .void => .void,
+            .bool => .boolean,
             .u8, .u16, .u32, .u64 => .unsigned_int,
             .s8, .s16, .s32, .s64 => .signed_int,
-            .bool => .boolean,
         };
     }
     pub const Kind = enum {
+        void,
+        boolean,
         unsigned_int,
         signed_int,
-        boolean,
     };
 
     pub fn format(ty: Type, _: []const u8, _: std.fmt.FormatOptions, w: anytype) !void {
