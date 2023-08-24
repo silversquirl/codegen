@@ -73,7 +73,7 @@ pub fn virtualAlloc(
 
             // Update register conflict set based on liveness
             {
-                var it = live.operandDeaths(func.insns, blk.start, insn_ref);
+                var it = live.deaths(func.insns, blk.start, insn_ref);
                 while (it.next()) |dead_ref| {
                     const dead_reg = regs.get(blk.start, dead_ref);
                     _ = reg_set.remove(dead_reg);

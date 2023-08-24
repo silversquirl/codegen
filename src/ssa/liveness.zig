@@ -71,14 +71,15 @@ pub const Info = struct {
         };
     }
 
-    pub fn operandDeaths(
+    pub fn deaths(
         liveness: Info,
         insns: ssa.InstructionStore(ssa.Instruction),
         base: ssa.Block.Start,
         insn_ref: ssa.Instruction.Ref,
-    ) OperandDeathIterator {
+    ) DeathIterator {
         const insn = insns.get(base, insn_ref);
         return .{
+            .ref = insn_ref,
             .insn = insn,
             .small = liveness.small.get(base, insn_ref).iterator(.{}),
             .large = if (insn.arity() < Small.bit_length)
@@ -108,14 +109,15 @@ pub const Single = struct {
     }
 };
 
-pub const OperandDeathIterator = struct {
+pub const DeathIterator = struct {
+    ref: ssa.Instruction.Ref,
     insn: ssa.Instruction,
     small: Info.Small.Iterator(.{}),
     large: Info.Large.Iterator(.{}), // undefined if insn.arity() < Info.Small.bit_length
 
-    pub fn next(it: *OperandDeathIterator) ?ssa.Instruction.Ref {
+    pub fn next(it: *DeathIterator) ?ssa.Instruction.Ref {
         if (it.small.next()) |idx| {
-            if (idx == 0) return it.next();
+            if (idx == 0) return it.ref; // Immediate death
             return it.insn.operand(idx - 1);
         } else if (it.insn.arity() >= Info.Small.bit_length) {
             if (it.large.next()) |i| {
