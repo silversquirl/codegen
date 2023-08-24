@@ -295,6 +295,7 @@ test "allocate virtual registers" {
         \\  %2: u32 = add %0, %1    v$2
         \\  %3: u32 = mul %0!, %1    v$3
         \\  jump @1(%1, %2, %3)
+        \\
         \\@1(
         \\    %0: u32    v$1
         \\    %1: u32    v$2
@@ -303,6 +304,7 @@ test "allocate virtual registers" {
         \\  %3: u32 = i_const 0    v$4
         \\  %4: bool = gt %2, %3!    v$5
         \\  branch %4, @2(%0, %1, %2), @3(%2)
+        \\
         \\@2(
         \\    %0: u32    v$1
         \\    %1: u32    v$2
@@ -312,6 +314,7 @@ test "allocate virtual registers" {
         \\  %4: u32 = sub %1!, %3!    v$2
         \\  %5: u32 = mul %2!, %0    v$3
         \\  jump @1(%0, %4, %5)
+        \\
         \\@3(
         \\    %0: u32    v$3
         \\):
@@ -384,6 +387,7 @@ test "allocate virtual registers 2" {
         \\):
         \\  %2: bool = lt %0, %1    v$2
         \\  branch %2, @1(%0, %1), @2(%0)
+        \\
         \\@1(
         \\    %0: u32    v$0
         \\    %1: u32    v$1
@@ -391,12 +395,14 @@ test "allocate virtual registers 2" {
         \\  %2: u32 = i_const 1    v$3
         \\  %3: u32 = add %1!, %2!    v$4
         \\  jump @3(%0, %3)
+        \\
         \\@2(
         \\    %0: u32    v$0
         \\):
         \\  %1: u32 = i_const 1    v$5
         \\  %2: u32 = add %0, %1!    v$6
         \\  jump @1(%2, %0)
+        \\
         \\@3(
         \\    %0: u32    v$0
         \\    %1!: u32    v$4

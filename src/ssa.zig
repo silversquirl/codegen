@@ -245,6 +245,10 @@ pub const Function = struct {
                 } else FakeLiveness{};
 
                 for (fmt.func.blocks.items, 0..) |blk, blk_i| {
+                    if (fmt.annotations.len > 0 and blk_i > 0) {
+                        try w.writeAll("\n");
+                    }
+
                     try w.print("@{}(", .{blk_i});
                     if (fmt.annotations.len > 0 and blk.insns(fmt.func.insns)[0] == .param) {
                         try w.writeAll("\n");
