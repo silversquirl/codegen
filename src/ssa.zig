@@ -203,11 +203,11 @@ pub const Block = struct {
         }
     };
 
-    pub fn insns(blk: Block, i: InstructionStore(Instruction)) []const Instruction {
-        return i.items[@intFromEnum(blk.start)..][0..blk.count];
-    }
-    pub fn types(blk: Block, t: InstructionStore(Type)) []const Type {
-        return t.items[@intFromEnum(blk.start)..][0..blk.count];
+    pub fn slice(blk: Block, insn_store: anytype) []const @TypeOf(insn_store).Value {
+        if (@TypeOf(insn_store).BaseIndex != Start or @TypeOf(insn_store).OffsetIndex != Instruction.Ref) {
+            @compileError("Block.slice's argument must be an InstructionStore");
+        }
+        return insn_store.items[@intFromEnum(blk.start)..][0..blk.count];
     }
 };
 
@@ -250,12 +250,12 @@ pub const Function = struct {
                     }
 
                     try w.print("@{}(", .{blk_i});
-                    if (fmt.annotations.len > 0 and blk.insns(fmt.func.insns)[0] == .param) {
+                    if (fmt.annotations.len > 0 and blk.slice(fmt.func.insns)[0] == .param) {
                         try w.writeAll("\n");
                     }
 
                     var params = true;
-                    for (blk.insns(fmt.func.insns), blk.types(fmt.func.types), 0..) |insn, ty, insn_i| {
+                    for (blk.slice(fmt.func.insns), blk.slice(fmt.func.types), 0..) |insn, ty, insn_i| {
                         const insn_ref: Instruction.Ref = @enumFromInt(insn_i);
                         const insn_live = live.single(fmt.func.insns, blk.start, insn_ref);
 

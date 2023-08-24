@@ -67,7 +67,7 @@ pub fn virtualAlloc(
 
         // Allocate registers for all instructions
         reg_set.clearRetainingCapacity();
-        for (blk.insns(func.insns), 0..) |insn, insn_i| {
+        for (blk.slice(func.insns), 0..) |insn, insn_i| {
             const insn_ref: ssa.Instruction.Ref = @enumFromInt(insn_i);
             const reg = regs.getPtr(blk.start, insn_ref);
 

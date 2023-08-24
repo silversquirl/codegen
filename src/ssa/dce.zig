@@ -38,7 +38,7 @@ pub fn apply(allocator: std.mem.Allocator, func: *ssa.Function, live: ssa.livene
 
         insn_mapping.items.clearRetainingCapacity();
         new_blk.start = @enumFromInt(insns.count());
-        for (old_blk.insns(func.insns), old_blk.types(func.types), 0..) |insn, ty, insn_idx| {
+        for (old_blk.slice(func.insns), old_blk.slice(func.types), 0..) |insn, ty, insn_idx| {
             const old_ref: ssa.Instruction.Ref = @enumFromInt(insn_idx);
             if (live.diesImmediately(old_blk.start, old_ref)) {
                 // Not used, don't include
