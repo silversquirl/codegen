@@ -6,7 +6,7 @@ const ssa = @import("../ssa.zig");
 /// Remove dead code from a function.
 /// Deletes unused instructions and blocks. May reorder both instructions and blocks, but will not change behaviour.
 /// TODO: eliminate unneeded parameters
-pub fn apply(allocator: std.mem.Allocator, func: *ssa.Function) !void {
+pub fn apply(allocator: std.mem.Allocator, func: *ssa.Function, options: Options) !void {
     var rb = try Rebuilder.init(allocator, func);
     defer rb.deinit();
 
@@ -15,7 +15,10 @@ pub fn apply(allocator: std.mem.Allocator, func: *ssa.Function) !void {
 
     while (try rb.next()) |blk| {
         for (blk.old.slice(func.insns), 0..) |insn, insn_idx| {
-            if (insn.hasSideEffect() or insn == .param) {
+            if (insn == .param or
+                insn.hasSideEffect() or
+                (!options.remove_metadata and insn.isMetadata()))
+            {
                 _ = try rb.mapInsn(@enumFromInt(insn_idx));
             }
         }
@@ -58,6 +61,10 @@ pub fn apply(allocator: std.mem.Allocator, func: *ssa.Function) !void {
 
     try rb.finish();
 }
+
+pub const Options = struct {
+    remove_metadata: bool = true,
+};
 
 const Rebuilder = struct {
     allocator: std.mem.Allocator,
@@ -179,7 +186,7 @@ const Rebuilder = struct {
         std.debug.assert(rb.insn_stack.items.len == 0);
         try rb.insn_stack.append(rb.allocator, root);
         while (rb.insn_stack.getLastOrNull()) |old_ref| {
-            const insn = rb.func.insns.get(rb.current.old.start, root);
+            const insn = rb.func.insns.get(rb.current.old.start, old_ref);
 
             // Map all operands
             var all_mapped = true;
@@ -207,8 +214,13 @@ const Rebuilder = struct {
         ty: ssa.Type,
         insn: ssa.Instruction,
     ) !ssa.Instruction.Ref {
-        const new_insn = switch (insn) {
-            .param, .void, .i_const => insn,
+        const new_insn: ssa.Instruction = switch (insn) {
+            .param, .void, .i_const, .true, .false => insn,
+
+            .expect => |e| .{ .expect = .{
+                .value = rb.insn_mapping.get(e.value),
+                .probability = e.probability,
+            } },
 
             .call => |call| a: {
                 // Safe to modify in-place since we know it's allocated in the function's arena
@@ -261,7 +273,8 @@ test "delete dead blocks" {
         \\@unused2():
         \\  jump @used2()
         \\@unused3():
-        \\  jump @start()
+        \\  %1: bool = true
+        \\  jump @start(%1)
         \\@unused4():
         \\  jump @unused5()
         \\@unused5():
@@ -272,8 +285,10 @@ test "delete dead blocks" {
         \\
     );
     defer func.deinit(std.testing.allocator);
+    try ssa.validate(func);
 
-    try apply(std.testing.allocator, &func);
+    try apply(std.testing.allocator, &func, .{});
+    try ssa.validate(func);
 
     try std.testing.expectFmt(
         \\@0(%0: bool):
@@ -305,13 +320,78 @@ test "delete dead instructions" {
         \\
     );
     defer func.deinit(std.testing.allocator);
+    try ssa.validate(func);
 
-    try apply(std.testing.allocator, &func);
+    try apply(std.testing.allocator, &func, .{});
+    try ssa.validate(func);
 
     try std.testing.expectFmt(
         \\@0(%0: u32):
         \\  %1: u32 = mul %0, %0
         \\  ret %1
+        \\
+    , "{}", .{func});
+}
+
+test "delete metadata" {
+    var func = try ssa.parse(std.testing.allocator,
+        \\@0(%0: u32):
+        \\  %1: u32 = add %0, %0
+        \\  %2: u32 = mul %1, %0
+        \\  %3: bool = lt %2, %1
+        \\  %4: u32 = mul %0, %0
+        \\  %5: u32 = sub %2, %4
+        \\  %6: u32 = add %0, %1
+        \\  %7: u32 = div %4, %2
+        \\  %8: bool = eq %6, %7
+        \\  %9: void = expect %8, 0.5
+        \\  ret %4
+        \\
+    );
+    defer func.deinit(std.testing.allocator);
+    try ssa.validate(func);
+
+    try apply(std.testing.allocator, &func, .{});
+    try ssa.validate(func);
+
+    try std.testing.expectFmt(
+        \\@0(%0: u32):
+        \\  %1: u32 = mul %0, %0
+        \\  ret %1
+        \\
+    , "{}", .{func});
+}
+
+test "keep metadata" {
+    var func = try ssa.parse(std.testing.allocator,
+        \\@0(%0: u32):
+        \\  %1: u32 = add %0, %0
+        \\  %2: u32 = mul %1, %0
+        \\  %3: bool = lt %2, %1
+        \\  %4: u32 = mul %0, %0
+        \\  %5: u32 = sub %2, %4
+        \\  %6: u32 = add %0, %1
+        \\  %7: u32 = div %4, %2
+        \\  %8: bool = eq %6, %7
+        \\  %9: void = expect %8, 0.5
+        \\  ret %4
+        \\
+    );
+    defer func.deinit(std.testing.allocator);
+    try ssa.validate(func);
+
+    try apply(std.testing.allocator, &func, .{ .remove_metadata = false });
+
+    try std.testing.expectFmt(
+        \\@0(%0: u32):
+        \\  %1: u32 = add %0, %0
+        \\  %2: u32 = mul %1, %0
+        \\  %3: u32 = mul %0, %0
+        \\  %4: u32 = div %3, %2
+        \\  %5: u32 = add %0, %1
+        \\  %6: bool = eq %5, %4
+        \\  %7: void = expect %6, 0.5
+        \\  ret %3
         \\
     , "{}", .{func});
 }

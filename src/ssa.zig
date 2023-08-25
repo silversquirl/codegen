@@ -1,15 +1,21 @@
 //! High-level SSA IR
 const std = @import("std");
 const util = @import("util");
+
 pub const dce = @import("ssa/dce.zig");
-pub const parse = @import("ssa/parse.zig").parse;
 pub const liveness = @import("ssa/liveness.zig");
+
+pub const parse = @import("ssa/parse.zig").parse;
+pub const validate = @import("ssa/validate.zig").validate;
 
 pub const Instruction = union(enum) {
     param: void,
+    expect: Expectation,
 
     void: void,
     i_const: u64,
+    true: void,
+    false: void,
 
     add: Binary,
     sub: Binary,
@@ -24,6 +30,11 @@ pub const Instruction = union(enum) {
     ge: Binary,
 
     call: *const Call,
+
+    pub const Expectation = struct {
+        value: Ref,
+        probability: f16, // Probability that `value` is true
+    };
 
     pub const Binary = struct {
         lhs: Ref,
@@ -53,7 +64,8 @@ pub const Instruction = union(enum) {
 
     pub fn arity(insn: Instruction) usize {
         return switch (insn) {
-            .param, .void, .i_const => 0,
+            .param, .void, .i_const, .true, .false => 0,
+            .expect => 1,
             .call => |call| call.args.len,
             inline else => |i| switch (@TypeOf(i)) {
                 Binary => 2,
@@ -64,7 +76,8 @@ pub const Instruction = union(enum) {
 
     pub fn operand(insn: Instruction, idx: usize) Ref {
         return switch (insn) {
-            .param, .void, .i_const => unreachable,
+            .param, .void, .i_const, .true, .false => unreachable,
+            .expect => |e| if (idx == 0) e.value else unreachable,
             .call => |call| call.args[idx],
 
             inline else => |i| switch (@TypeOf(i)) {
@@ -82,6 +95,12 @@ pub const Instruction = union(enum) {
     pub fn hasSideEffect(insn: Instruction) bool {
         return switch (insn) {
             .call => true,
+            else => false,
+        };
+    }
+    pub fn isMetadata(insn: Instruction) bool {
+        return switch (insn) {
+            .expect => true,
             else => false,
         };
     }
@@ -115,6 +134,8 @@ pub const Instruction = union(enum) {
                 try w.print("{s}", .{@tagName(fmt.insn)});
                 switch (fmt.insn) {
                     .i_const => |v| try w.print(" {}", .{v}),
+
+                    .expect => |e| try w.print(" {}, {d}", .{ e.value, e.probability }),
 
                     .call => |call| {
                         try w.print(" {s}(", .{call.name});

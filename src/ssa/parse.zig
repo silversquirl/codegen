@@ -159,11 +159,23 @@ const Parser = struct {
 
         switch (insn_tag) {
             .param => return error.InvalidInstruction,
+            inline .void, .true, .false => |tag| return blk.i(ty, tag),
 
-            .void => return blk.i(ty, .void),
+            .expect => {
+                const value = try p.getTemp(try p.exact(.temp));
+                _ = try p.exact(.comma);
+
+                const prob_str = try p.exact(.float);
+                const prob = try std.fmt.parseFloat(f16, prob_str);
+
+                return blk.i(ty, .{ .expect = .{
+                    .value = value,
+                    .probability = prob,
+                } });
+            },
 
             .i_const => {
-                const num_str = try p.exact(.number);
+                const num_str = try p.exact(.unsigned);
                 const num = try std.fmt.parseUnsigned(u64, num_str, 10);
                 return blk.i(ty, .{ .i_const = num });
             },
@@ -347,7 +359,8 @@ const Token = struct {
         temp,
         label,
         word,
-        number,
+        unsigned,
+        float,
     };
 };
 
@@ -373,7 +386,13 @@ const Tokenizer = struct {
                     else => break,
                 },
 
-                .number => switch (c) {
+                .unsigned => switch (c) {
+                    '0'...'9' => {},
+                    '.' => tag = .float,
+                    else => break,
+                },
+
+                .float => switch (c) {
                     '0'...'9' => {},
                     else => break,
                 },
@@ -390,7 +409,8 @@ const Tokenizer = struct {
                     '%' => .temp,
                     '@' => .label,
                     'a'...'z', 'A'...'Z', '_' => .word,
-                    '0'...'9' => .number,
+                    '0'...'9' => .unsigned,
+                    '.' => .float,
 
                     else => .invalid,
                 };
@@ -434,6 +454,7 @@ test "simple parse" {
 
     const func = try parse(std.testing.allocator, src);
     defer func.deinit(std.testing.allocator);
+    try ssa.validate(func);
 
     try std.testing.expectFmt(src, "{}", .{func});
 }
@@ -457,6 +478,7 @@ test "named temporaries/blocks" {
 
     const func = try parse(std.testing.allocator, src);
     defer func.deinit(std.testing.allocator);
+    try ssa.validate(func);
 
     try std.testing.expectFmt(
         \\@0():
