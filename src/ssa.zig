@@ -79,6 +79,13 @@ pub const Instruction = union(enum) {
         };
     }
 
+    pub fn hasSideEffect(insn: Instruction) bool {
+        return switch (insn) {
+            .call => true,
+            else => false,
+        };
+    }
+
     pub fn format(insn: Instruction, comptime fmt: []const u8, opts: std.fmt.FormatOptions, w: anytype) !void {
         try insn.fmtWithLiveness(FakeLiveness.Single{}).format(fmt, opts, w);
     }

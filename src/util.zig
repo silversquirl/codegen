@@ -124,9 +124,7 @@ pub fn SectionIndexedStore(comptime BaseIndexEnum: type, comptime OffsetIndexEnu
         }
 
         inline fn checkInvalid(offset: OffsetIndex) void {
-            if (comptime invalid) |v| {
-                std.debug.assert(offset != v);
-            }
+            if (comptime invalid) |v| std.debug.assert(offset != v);
         }
 
         pub const Mutable = struct {

@@ -4,84 +4,32 @@ const util = @import("util");
 const ssa = @import("../ssa.zig");
 
 /// Remove dead code from a function.
-/// Deletes unused instructions and blocks. May reorder blocks, but will not reorder instructions within them.
-/// Does not modify the passed-in liveness information, which must be recomputed.
-/// FIXME: this currently relies too heavily on liveness and requires multiple passes for full effectiveness
-pub fn apply(allocator: std.mem.Allocator, func: *ssa.Function, live: ssa.liveness.Info) !void {
-    var insns: ssa.InstructionStore(ssa.Instruction).Mutable = .{};
-    errdefer insns.deinit(allocator);
+/// Deletes unused instructions and blocks. May reorder both instructions and blocks, but will not change behaviour.
+/// TODO: eliminate unneeded parameters
+pub fn apply(allocator: std.mem.Allocator, func: *ssa.Function) !void {
+    var rb = try Rebuilder.init(allocator, func);
+    defer rb.deinit();
 
-    var types: ssa.InstructionStore(ssa.Type).Mutable = .{};
-    errdefer types.deinit(allocator);
-
-    var blocks: util.IndexedStore(ssa.Block.Ref, ssa.Block).Mutable = .{};
-    errdefer blocks.deinit(allocator);
-
-    // Mapping from old blocks to new blocks
-    var block_mapping: util.IndexedStore(ssa.Block.Ref, ssa.Block.Ref).Mutable = .{};
-    defer block_mapping.deinit(allocator);
-    try block_mapping.resize(allocator, func.blocks.count());
-    @memset(block_mapping.items.items, .invalid);
-
-    // Block-local mapping from old instructions to new instructions
-    var insn_mapping: util.IndexedStore(ssa.Instruction.Ref, ssa.Instruction.Ref).Mutable = .{};
-    defer insn_mapping.deinit(allocator);
-
-    var stack = std.ArrayList(ssa.Block.Ref).init(allocator);
-    defer stack.deinit();
-    const new_zero = try mapBlock(&stack, &blocks, block_mapping, @enumFromInt(0));
+    const new_zero = try rb.mapBlock(@enumFromInt(0));
     std.debug.assert(@intFromEnum(new_zero) == 0);
-    while (stack.popOrNull()) |old_blk_ref| {
-        const new_blk_ref = block_mapping.get(old_blk_ref);
-        const old_blk = func.blocks.get(old_blk_ref);
-        const new_blk = blocks.getPtr(new_blk_ref);
 
-        insn_mapping.items.clearRetainingCapacity();
-        new_blk.start = @enumFromInt(insns.count());
-        for (old_blk.slice(func.insns), old_blk.slice(func.types), 0..) |insn, ty, insn_idx| {
-            const old_ref: ssa.Instruction.Ref = @enumFromInt(insn_idx);
-            if (live.diesImmediately(old_blk.start, old_ref)) {
-                // Not used, don't include
-                std.debug.assert(old_ref == try insn_mapping.append(allocator, .invalid));
-            } else {
-                const new_insn = switch (insn) {
-                    .param, .void, .i_const => insn,
-
-                    .call => |call| a: {
-                        // Safe to modify in-place since we know it's allocated in the function's arena
-                        for (@constCast(call.args)) |*arg| {
-                            arg.* = insn_mapping.get(arg.*);
-                        }
-                        break :a insn;
-                    },
-
-                    inline else => |i, name| switch (@TypeOf(i)) {
-                        ssa.Instruction.Binary => @unionInit(ssa.Instruction, @tagName(name), .{
-                            .lhs = insn_mapping.get(i.lhs),
-                            .rhs = insn_mapping.get(i.rhs),
-                        }),
-
-                        else => |t| @compileError("Unknown instruction type " ++ @typeName(t)),
-                    },
-                };
-
-                const new_ref = try insns.append(allocator, new_blk.start, new_insn);
-                std.debug.assert(new_ref == try types.append(allocator, new_blk.start, ty));
-                std.debug.assert(old_ref == try insn_mapping.append(allocator, new_ref));
+    while (try rb.next()) |blk| {
+        for (blk.old.slice(func.insns), 0..) |insn, insn_idx| {
+            if (insn.hasSideEffect() or insn == .param) {
+                _ = try rb.mapInsn(@enumFromInt(insn_idx));
             }
         }
-        new_blk.count = insns.count() - @intFromEnum(new_blk.start);
 
-        new_blk.term = switch (old_blk.term) {
-            .ret => |t| .{ .ret = insn_mapping.get(t) },
+        blk.new.term = switch (blk.old.term) {
+            .ret => |t| .{ .ret = try rb.mapInsn(t) },
 
             .jump => |t| a: {
                 var i: usize = 0;
                 while (t.args[i] != .invalid) : (i += 1) {
-                    t.args[i] = insn_mapping.get(t.args[i]);
+                    t.args[i] = try rb.mapInsn(t.args[i]);
                 }
                 break :a .{ .jump = .{
-                    .to = try mapBlock(&stack, &blocks, block_mapping, t.to),
+                    .to = try rb.mapBlock(t.to),
                     .args = t.args,
                 } };
             },
@@ -89,50 +37,203 @@ pub fn apply(allocator: std.mem.Allocator, func: *ssa.Function, live: ssa.livene
             .branch => |t| a: {
                 var i: usize = 0;
                 while (t.args[i] != .invalid) : (i += 1) {
-                    t.args[i] = insn_mapping.get(t.args[i]);
+                    t.args[i] = try rb.mapInsn(t.args[i]);
                 }
                 i += 1;
                 while (t.args[i] != .invalid) : (i += 1) {
-                    t.args[i] = insn_mapping.get(t.args[i]);
+                    t.args[i] = try rb.mapInsn(t.args[i]);
                 }
 
                 break :a .{ .branch = .{
-                    .cond = insn_mapping.get(t.cond),
-                    .true = try mapBlock(&stack, &blocks, block_mapping, t.true),
-                    .false = try mapBlock(&stack, &blocks, block_mapping, t.false),
+                    .cond = try rb.mapInsn(t.cond),
+                    .true = try rb.mapBlock(t.true),
+                    .false = try rb.mapBlock(t.false),
                     .args = t.args,
                 } };
             },
         };
+
+        blk.new.count = rb.insns.count() - @intFromEnum(blk.new.start);
     }
 
-    const insns_const = try insns.toConst(allocator);
-    const types_const = try types.toConst(allocator);
-    const blocks_const = try blocks.toConst(allocator);
-
-    func.insns.deinit(allocator);
-    func.types.deinit(allocator);
-    func.blocks.deinit(allocator);
-
-    func.insns = insns_const;
-    func.types = types_const;
-    func.blocks = blocks_const;
+    try rb.finish();
 }
 
-fn mapBlock(
-    stack: *std.ArrayList(ssa.Block.Ref),
-    blocks: *util.IndexedStore(ssa.Block.Ref, ssa.Block).Mutable,
-    block_mapping: util.IndexedStore(ssa.Block.Ref, ssa.Block.Ref).Mutable,
-    old_ref: ssa.Block.Ref,
-) !ssa.Block.Ref {
-    const new_ref = block_mapping.getPtr(old_ref);
-    if (new_ref.* != .invalid) return new_ref.*;
+const Rebuilder = struct {
+    allocator: std.mem.Allocator,
+    func: *ssa.Function,
 
-    // Allocate a new block and queue it for processing
-    new_ref.* = try blocks.appendUndefined(stack.allocator);
-    try stack.append(old_ref);
-    return new_ref.*;
-}
+    // Blocks to be processed
+    block_stack: std.ArrayListUnmanaged(ssa.Block.Ref) = .{},
+    // Instructions to be processed
+    insn_stack: std.ArrayListUnmanaged(ssa.Instruction.Ref) = .{},
+
+    // Current blocks being processed
+    current: Blocks = undefined,
+
+    insns: ssa.InstructionStore(ssa.Instruction).Mutable = .{},
+    types: ssa.InstructionStore(ssa.Type).Mutable = .{},
+    blocks: util.IndexedStore(ssa.Block.Ref, ssa.Block).Mutable = .{},
+
+    // Mapping from old to new blocks
+    block_mapping: util.IndexedStore(ssa.Block.Ref, ssa.Block.Ref).Mutable = .{},
+    // Block-local mapping from old to new instructions
+    insn_mapping: util.IndexedStore(ssa.Instruction.Ref, ssa.Instruction.Ref).Mutable = .{},
+
+    pub const Blocks = struct {
+        old_ref: ssa.Block.Ref,
+        old: ssa.Block,
+        new_ref: ssa.Block.Ref,
+        new: *ssa.Block,
+    };
+
+    pub fn init(allocator: std.mem.Allocator, func: *ssa.Function) !Rebuilder {
+        var rb = Rebuilder{
+            .allocator = allocator,
+            .func = func,
+        };
+
+        try rb.block_mapping.resize(allocator, func.blocks.count());
+        errdefer rb.block_mapping.deinit(allocator);
+        @memset(rb.block_mapping.items.items, .invalid);
+
+        return rb;
+    }
+
+    pub fn deinit(rb: *Rebuilder) void {
+        rb.block_stack.deinit(rb.allocator);
+        rb.insn_stack.deinit(rb.allocator);
+
+        rb.insns.deinit(rb.allocator);
+        rb.types.deinit(rb.allocator);
+        rb.blocks.deinit(rb.allocator);
+
+        rb.block_mapping.deinit(rb.allocator);
+        rb.insn_mapping.deinit(rb.allocator);
+    }
+
+    pub fn finish(rb: *Rebuilder) !void {
+        const insns_const = try rb.insns.toConst(rb.allocator);
+        const types_const = try rb.types.toConst(rb.allocator);
+        const blocks_const = try rb.blocks.toConst(rb.allocator);
+
+        rb.func.insns.deinit(rb.allocator);
+        rb.func.types.deinit(rb.allocator);
+        rb.func.blocks.deinit(rb.allocator);
+
+        rb.func.insns = insns_const;
+        rb.func.types = types_const;
+        rb.func.blocks = blocks_const;
+    }
+
+    pub fn next(rb: *Rebuilder) !?Blocks {
+        const old_ref = rb.block_stack.popOrNull() orelse return null;
+        const old = rb.func.blocks.get(old_ref);
+
+        const new_ref = rb.block_mapping.get(old_ref);
+        const new = rb.blocks.getPtr(new_ref);
+        new.start = @enumFromInt(rb.insns.count());
+
+        try rb.insn_mapping.resize(rb.allocator, old.count);
+        @memset(rb.insn_mapping.items.items, .invalid);
+
+        std.debug.assert(rb.insn_stack.items.len == 0);
+
+        rb.current = .{
+            .old_ref = old_ref,
+            .old = old,
+            .new_ref = new_ref,
+            .new = new,
+        };
+        return rb.current;
+    }
+
+    pub fn mapBlock(rb: *Rebuilder, old_ref: ssa.Block.Ref) !ssa.Block.Ref {
+        const new_ref = rb.block_mapping.getPtr(old_ref);
+        if (new_ref.* == .invalid) {
+            // Allocate a new block and queue it for processing
+            new_ref.* = try rb.blocks.appendUndefined(rb.allocator);
+            try rb.block_stack.append(rb.allocator, old_ref);
+        }
+        return new_ref.*;
+    }
+
+    pub fn mapInsn(
+        rb: *Rebuilder,
+        old_ref: ssa.Instruction.Ref,
+    ) !ssa.Instruction.Ref {
+        const new_ref = rb.insn_mapping.get(old_ref);
+        if (new_ref == .invalid) {
+            // Recursively copy to new function
+            try rb.copyInsns(old_ref);
+            return rb.insn_mapping.get(old_ref);
+        } else {
+            return new_ref;
+        }
+    }
+
+    fn copyInsns(
+        rb: *Rebuilder,
+        root: ssa.Instruction.Ref,
+    ) !void {
+        std.debug.assert(rb.insn_stack.items.len == 0);
+        try rb.insn_stack.append(rb.allocator, root);
+        while (rb.insn_stack.getLastOrNull()) |old_ref| {
+            const insn = rb.func.insns.get(rb.current.old.start, root);
+
+            // Map all operands
+            var all_mapped = true;
+            for (0..insn.arity()) |i| {
+                const operand = insn.operand(i);
+                if (rb.insn_mapping.get(operand) == .invalid) {
+                    try rb.insn_stack.append(rb.allocator, operand);
+                    all_mapped = false;
+                }
+            }
+            if (!all_mapped) continue;
+
+            // Pop
+            std.debug.assert(old_ref == rb.insn_stack.pop());
+
+            // Copy instruction
+            const new_ref = rb.insn_mapping.getPtr(old_ref);
+            const ty = rb.func.types.get(rb.current.old.start, old_ref);
+            new_ref.* = try rb.copyInsn(ty, insn);
+        }
+    }
+
+    pub fn copyInsn(
+        rb: *Rebuilder,
+        ty: ssa.Type,
+        insn: ssa.Instruction,
+    ) !ssa.Instruction.Ref {
+        const new_insn = switch (insn) {
+            .param, .void, .i_const => insn,
+
+            .call => |call| a: {
+                // Safe to modify in-place since we know it's allocated in the function's arena
+                for (@constCast(call.args)) |*arg| {
+                    arg.* = rb.insn_mapping.get(arg.*);
+                }
+                break :a insn;
+            },
+
+            inline else => |i, name| switch (@TypeOf(i)) {
+                ssa.Instruction.Binary => @unionInit(ssa.Instruction, @tagName(name), .{
+                    .lhs = rb.insn_mapping.get(i.lhs),
+                    .rhs = rb.insn_mapping.get(i.rhs),
+                }),
+
+                else => |t| @compileError("Unknown instruction type " ++ @typeName(t)),
+            },
+        };
+
+        const new_start = rb.current.new.start;
+        const new_ref = try rb.insns.append(rb.allocator, new_start, new_insn);
+        std.debug.assert(new_ref == try rb.types.append(rb.allocator, new_start, ty));
+        return new_ref;
+    }
+};
 
 comptime {
     std.testing.refAllDecls(@This());
@@ -172,10 +273,7 @@ test "delete dead blocks" {
     );
     defer func.deinit(std.testing.allocator);
 
-    const live = try ssa.liveness.analyze(std.testing.allocator, func);
-    defer live.deinit(std.testing.allocator);
-
-    try apply(std.testing.allocator, &func, live);
+    try apply(std.testing.allocator, &func);
 
     try std.testing.expectFmt(
         \\@0(%0: bool):
@@ -208,18 +306,12 @@ test "delete dead instructions" {
     );
     defer func.deinit(std.testing.allocator);
 
-    const live = try ssa.liveness.analyze(std.testing.allocator, func);
-    defer live.deinit(std.testing.allocator);
+    try apply(std.testing.allocator, &func);
 
-    try apply(std.testing.allocator, &func, live);
-
-    // FIXME: this should eliminate a lot more instructions
     try std.testing.expectFmt(
         \\@0(%0: u32):
-        \\  %1: u32 = add %0, %0
-        \\  %2: u32 = mul %1, %0
-        \\  %3: u32 = mul %0, %0
-        \\  ret %3
+        \\  %1: u32 = mul %0, %0
+        \\  ret %1
         \\
     , "{}", .{func});
 }
