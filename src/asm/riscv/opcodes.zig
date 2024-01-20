@@ -1,5 +1,5 @@
 pub const OpcodeDesc = struct {
-    name: []const u8,
+    name: [:0]const u8,
     match: u32,
     mask: u32,
     operands: []const Operand,

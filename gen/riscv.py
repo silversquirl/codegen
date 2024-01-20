@@ -7,14 +7,16 @@ import subprocess
 import sys
 
 os.chdir(os.path.dirname(__file__))
-subprocess.call([
-    "git", "clone", "https://github.com/riscv/riscv-opcodes",
-])
+subprocess.call(
+    [
+        "git",
+        "clone",
+        "https://github.com/riscv/riscv-opcodes",
+    ]
+)
 
 sys.path.append("./riscv-opcodes/")
-# autopep8: off
 import parse
-# autopep8: on
 
 exts = [
     "i",
@@ -26,13 +28,13 @@ exts = [
 
 
 insns = parse.create_inst_dict(
-    map('_'.join, itertools.product(["rv", "rv32", "rv64"], exts)),
+    map("_".join, itertools.product(["rv", "rv32", "rv64"], exts)),
     include_pseudo=True,
 )
 
 source = """
 pub const OpcodeDesc = struct {
-    name: []const u8,
+    name: [:0]const u8,
     match: u32,
     mask: u32,
     operands: []const Operand,
@@ -122,8 +124,8 @@ source += "};\n"
 
 with open("../src/asm/riscv/opcodes.zig", "w") as zig_file:
     fmt = subprocess.Popen(
-        ['zig', 'fmt', '--stdin'],
+        ["zig", "fmt", "--stdin"],
         stdin=subprocess.PIPE,
         stdout=zig_file,
     )
-    fmt.communicate(source.encode('utf-8'))
+    fmt.communicate(source.encode("utf-8"))
