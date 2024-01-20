@@ -7,13 +7,16 @@ import subprocess
 import sys
 
 os.chdir(os.path.dirname(__file__))
-subprocess.call(
-    [
-        "git",
-        "clone",
-        "https://github.com/riscv/riscv-opcodes",
-    ]
-)
+if os.path.exists("riscv-opcodes"):
+    subprocess.call(["git", "-C", "riscv-opcodes", "pull"])
+else:
+    subprocess.call(
+        [
+            "git",
+            "clone",
+            "https://github.com/riscv/riscv-opcodes",
+        ]
+    )
 
 sys.path.append("./riscv-opcodes/")
 import parse

@@ -411,3 +411,39 @@ test "allocate virtual registers 2" {
         \\
     , "{}", .{func.fmtWithAnnotations(.{ regs, live })});
 }
+
+pub fn physicalAlloc(
+    comptime Register: type,
+    // TODO: allow passing more register metadata
+    comptime usable: std.EnumSet(Register),
+    allocator: std.mem.Allocator,
+    func: ssa.Function,
+    virt: ssa.InstructionStore(VirtualRegister),
+) !ssa.InstructionStore(Register) {
+    var regs: ssa.InstructionStore(Register).Mutable = .{};
+    errdefer regs.deinit(allocator);
+    try regs.resize(allocator, func.insns.count());
+
+    var unused = usable.iterator();
+
+    var vreg_map = std.AutoHashMap(VirtualRegister, Register).init(allocator);
+    defer vreg_map.deinit();
+    try vreg_map.ensureTotalCapacity(64);
+
+    // TODO: implement a better algorithm
+    for (func.blocks.items) |blk| {
+        for (blk.slice(virt), 0..) |vreg, insn_i| {
+            const insn_ref: ssa.Instruction.Ref = @enumFromInt(insn_i);
+
+            const gop = try vreg_map.getOrPut(vreg);
+            if (!gop.found_existing) {
+                // TODO: stack spilling
+                const reg = unused.next() orelse return error.OutOfRegisters;
+                gop.value_ptr.* = reg;
+            }
+            regs.getPtr(blk.start, insn_ref).* = gop.value_ptr.*;
+        }
+    }
+
+    return regs.toConst(allocator);
+}

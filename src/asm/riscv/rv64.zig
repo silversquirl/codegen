@@ -40,6 +40,8 @@ pub const Register = enum(u5) {
     x31,
 };
 
+pub const mutable_regs = std.EnumSet(Register).initOne(.x0).complement();
+
 pub const RoundingMode = enum(u3) {
     nearest_even = 0b000, // Towards nearest, ties to even
     nearest_max = 0b100, // Towards nearest, ties to max magnitude

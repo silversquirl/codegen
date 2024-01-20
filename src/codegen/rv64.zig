@@ -12,7 +12,24 @@ pub fn compile(
     func: ssa.Function,
     liveness: ssa.liveness.Info,
 ) ![]const u8 {
-    var comp = try Compiler.init(allocator, func, liveness);
+    const vregs = try regalloc.virtualAlloc(allocator, func, liveness);
+    defer vregs.deinit(allocator);
+
+    const regs = try regalloc.physicalAlloc(rv64.Register, rv64.mutable_regs, allocator, func, vregs);
+    defer regs.deinit(allocator);
+
+    for (func.blocks.items) |blk| {
+        for (blk.slice(func.insns), blk.slice(vregs), blk.slice(regs), 0..) |ins, vreg, reg, insn_i| {
+            const live = liveness.single(func.insns, blk.start, @enumFromInt(insn_i));
+            std.debug.print("{} {} {}\n", .{
+                ins.fmtWithLiveness(live),
+                vreg,
+                reg,
+            });
+        }
+    }
+
+    var comp = try Compiler.init(allocator, func, liveness, regs);
     defer comp.deinit();
 
     // Count required instructions and generate label data
@@ -41,18 +58,16 @@ const Compiler = struct {
     allocator: std.mem.Allocator,
     func: ssa.Function,
     liveness: ssa.liveness.Info,
+    regs: ssa.InstructionStore(rv64.Register),
     labels: util.IndexedStore(ssa.Block.Ref, u32).Mutable = .{},
-    // one less because x0 cannot be allocated (it is always zero)
-    register_lifetimes: [nreg - 1]ssa.Instruction.Ref = .{.invalid} ** (nreg - 1),
     code: []u8 = undefined,
 
-    const nreg = std.enums.values(rv64.Register).len;
-
-    fn init(allocator: std.mem.Allocator, func: ssa.Function, liveness: ssa.liveness.Info) !Compiler {
+    fn init(allocator: std.mem.Allocator, func: ssa.Function, liveness: ssa.liveness.Info, regs: ssa.InstructionStore(rv64.Register)) !Compiler {
         var comp: Compiler = .{
             .allocator = allocator,
             .func = func,
             .liveness = liveness,
+            .regs = regs,
         };
 
         try comp.labels.resize(allocator, func.blocks.count());
@@ -67,15 +82,18 @@ const Compiler = struct {
     fn block(comp: *Compiler, comptime do_emit: bool, blk_ref: ssa.Block.Ref, start_offset: usize) !u32 {
         const blk = comp.func.blocks.getPtr(blk_ref);
         var count: u32 = 0;
-        for (blk.insns(comp.func.insns), blk.types(comp.func.types), @intFromEnum(blk.start)..) |insn, ty, insn_idx| {
+        for (blk.slice(comp.func.insns), blk.slice(comp.func.types), @intFromEnum(blk.start)..) |insn, ty, insn_idx| {
             const offset = start_offset + count;
             const insn_ref: ssa.Instruction.Ref = @enumFromInt(insn_idx);
             switch (insn) {
                 .param => {}, // TODO
+                .expect => {},
+
+                .void => {},
 
                 .i_const => |value| {
                     // TODO: immediates
-                    const reg = try comp.allocRegister(insn_ref);
+                    const reg = comp.regs.get(blk.start, insn_ref);
                     switch (ty.kind()) {
                         .unsigned_int => {
                             if (std.math.cast(u12, value)) |v12| {
@@ -115,6 +133,9 @@ const Compiler = struct {
                     }
                 },
 
+                .true => {},
+                .false => {},
+
                 .add => {},
                 .sub => {},
                 .mul => {},
@@ -135,48 +156,49 @@ const Compiler = struct {
 
     fn emit(comp: *Compiler, offset: usize, insn: rv64.Instruction) !void {
         const op = try rv64.assembleInstruction(insn);
-        std.mem.writeIntLittle(u32, comp.code[@sizeOf(u32) * offset ..][0..@sizeOf(u32)], op);
+        std.mem.writeInt(u32, comp.code[@sizeOf(u32) * offset ..][0..@sizeOf(u32)], op, .little);
     }
 };
 
 comptime {
-    // std.testing.refAllDeclsRecursive(@This());
-    std.testing.refAllDeclsRecursive(regalloc);
+    std.testing.refAllDeclsRecursive(@This());
 }
 
-// test "basic arithmetic" {
-//     var b = ssa.Builder.init(std.testing.allocator);
-//     defer b.deinit();
+test "basic arithmetic" {
+    var b = ssa.Builder.init(std.testing.allocator);
+    defer b.deinit();
 
-//     var blk = try b.block(&.{});
-//     const c_13 = try blk.i(.u32, .{ .i_const = 13 });
-//     const c_7 = try blk.i(.u32, .{ .i_const = 7 });
-//     const add = try blk.i(.u32, .{ .add = .{ .lhs = c_13, .rhs = c_7 } });
-//     const c_4 = try blk.i(.u32, .{ .i_const = 4 });
-//     const sub = try blk.i(.u32, .{ .sub = .{ .lhs = add, .rhs = c_4 } });
-//     const c_3 = try blk.i(.u32, .{ .i_const = 3 });
-//     const mul = try blk.i(.u32, .{ .mul = .{ .lhs = sub, .rhs = c_3 } });
-//     const div = try blk.i(.u32, .{ .div = .{ .lhs = mul, .rhs = c_4 } });
-//     try blk.ret(div);
+    var blk = try b.block(&.{});
+    const c_13 = try blk.i(.u32, .{ .i_const = 13 });
+    const c_7 = try blk.i(.u32, .{ .i_const = 7 });
+    const add = try blk.i(.u32, .{ .add = .{ .lhs = c_13, .rhs = c_7 } });
+    const c_4 = try blk.i(.u32, .{ .i_const = 4 });
+    const sub = try blk.i(.u32, .{ .sub = .{ .lhs = add, .rhs = c_4 } });
+    const c_3 = try blk.i(.u32, .{ .i_const = 3 });
+    const mul = try blk.i(.u32, .{ .mul = .{ .lhs = sub, .rhs = c_3 } });
+    const div = try blk.i(.u32, .{ .div = .{ .lhs = mul, .rhs = c_4 } });
+    try blk.ret(div);
 
-//     const func = try b.finish();
-//     defer func.deinit(std.testing.allocator);
+    const func = try b.finish();
+    defer func.deinit(std.testing.allocator);
 
-//     try testGen(func, &.{
-//         .{ .addi = .{ .x3, .x0, 13 } },
-//         .{ .addi = .{ .x4, .x0, 7 } },
-//         // .{ .add = .{ ..., .x3, .x4 } },
-//         .{ .addi = .{ .x3, .x0, 4 } },
-//         // .{ .sub = .{ ..., ..., .x5 } },
-//         .{ .addi = .{ .x4, .x0, 3 } },
-//         // .{ .mul = .{ ..., ..., .x6 } },
-//         // .{ .div = .{ ..., ..., .x5 } },
-//     });
-// }
+    try testGen(func, &.{
+        .{ .addi = .{ .x1, .x0, 13 } },
+        .{ .addi = .{ .x2, .x0, 7 } },
+        // .{ .add = .{ ..., .x3, .x4 } },
+        .{ .addi = .{ .x2, .x0, 4 } },
+        // .{ .sub = .{ ..., ..., .x5 } },
+        .{ .addi = .{ .x3, .x0, 3 } },
+        // .{ .mul = .{ ..., ..., .x6 } },
+        // .{ .div = .{ ..., ..., .x5 } },
+    });
+}
 
 fn testGen(func: ssa.Function, expected: []const rv64.Instruction) !void {
     const liveness = try ssa.liveness.analyze(std.testing.allocator, func);
     defer liveness.deinit(std.testing.allocator);
+
+    std.debug.print("{}\n", .{func.fmtWithAnnotations(.{liveness})});
 
     const code = try compile(std.testing.allocator, std.testing.allocator, func, liveness);
     defer std.testing.allocator.free(code);
@@ -185,7 +207,7 @@ fn testGen(func: ssa.Function, expected: []const rv64.Instruction) !void {
     defer std.testing.allocator.free(exp_assembled);
     for (exp_assembled, expected) |*word, insn| {
         word.* = try rv64.assembleInstruction(insn);
-        if (@import("builtin").cpu.arch.endian() != .Little) {
+        if (@import("builtin").cpu.arch.endian() != .little) {
             word.* = @byteSwap(word.*);
         }
     }
