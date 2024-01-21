@@ -12,6 +12,9 @@ pub const VirtualRegister = enum(u32) {
     }
 };
 
+/// Assign virtual registers to SSA temporaries.
+/// This algorithm tries to avoid copies where possible, but makes no effort to reuse registers otherwise.
+/// For reuse optimizations, see physicalAlloc.
 pub fn virtualAlloc(
     allocator: std.mem.Allocator,
     func: ssa.Function,
@@ -31,7 +34,7 @@ pub fn virtualAlloc(
     defer reg_set.deinit();
     try reg_set.ensureTotalCapacity(64);
 
-    // Used to track temporaries that are arguments to finished blocks
+    // Used to track temporaries that are arguments to finished blocks called by the current block
     var finished_arg_temps = try std.DynamicBitSet.initEmpty(allocator, 64);
     defer finished_arg_temps.deinit();
 
@@ -414,34 +417,100 @@ test "allocate virtual registers 2" {
 
 pub fn physicalAlloc(
     comptime Register: type,
-    // TODO: allow passing more register metadata
+    // TODO: allow passing more register metadata, such as calling convention information and type information
     comptime usable: std.EnumSet(Register),
     allocator: std.mem.Allocator,
     func: ssa.Function,
+    live: ssa.liveness.Info,
     virt: ssa.InstructionStore(VirtualRegister),
 ) !ssa.InstructionStore(Register) {
     var regs: ssa.InstructionStore(Register).Mutable = .{};
     errdefer regs.deinit(allocator);
     try regs.resize(allocator, func.insns.count());
 
-    var unused = usable.iterator();
+    const AllocStore = struct {
+        virt: ssa.InstructionStore(VirtualRegister),
+        unused: std.EnumSet(Register),
+        vregs: util.IndexedStore(VirtualRegister, struct {
+            refs: @typeInfo(ssa.Instruction.Ref).Enum.tag_type = 0,
+            reg: ?Register = null,
+        }).Mutable = .{},
 
-    var vreg_map = std.AutoHashMap(VirtualRegister, Register).init(allocator);
-    defer vreg_map.deinit();
-    try vreg_map.ensureTotalCapacity(64);
+        fn release(store: *@This(), vreg: VirtualRegister) void {
+            const entry = store.vregs.getPtr(vreg);
+            entry.refs -= 1;
 
-    // TODO: implement a better algorithm
+            if (entry.refs == 0) {
+                store.unused.insert(entry.reg.?);
+                entry.* = undefined; // Should not be used past this point
+            }
+        }
+
+        fn releaseTemp(store: *@This(), start: ssa.Block.Start, ref: ssa.Instruction.Ref) void {
+            store.release(store.virt.get(start, ref));
+        }
+    };
+
+    var store: AllocStore = .{ .unused = usable, .virt = virt };
+    defer store.vregs.deinit(allocator);
+
+    // Count virtual register assignments
+    for (virt.items) |vreg| {
+        if (store.vregs.count() <= @intFromEnum(vreg)) {
+            try store.vregs.growAndFill(allocator, @intFromEnum(vreg) + 1, .{});
+        }
+        store.vregs.getPtr(vreg).refs += 1;
+    }
+
+    // TODO: implement a better algorithm than this greedy crap
     for (func.blocks.items) |blk| {
         for (blk.slice(virt), 0..) |vreg, insn_i| {
             const insn_ref: ssa.Instruction.Ref = @enumFromInt(insn_i);
 
-            const gop = try vreg_map.getOrPut(vreg);
-            if (!gop.found_existing) {
-                // TODO: stack spilling
-                const reg = unused.next() orelse return error.OutOfRegisters;
-                gop.value_ptr.* = reg;
+            // Release dead operands
+            var deaths = live.deaths(func.insns, blk.start, insn_ref);
+            var dies_immediately = false;
+            while (deaths.next()) |dead_temp| {
+                if (dead_temp == insn_ref) {
+                    dies_immediately = true;
+                } else {
+                    store.releaseTemp(blk.start, dead_temp);
+                }
             }
-            regs.getPtr(blk.start, insn_ref).* = gop.value_ptr.*;
+
+            const entry = store.vregs.getPtr(vreg);
+            if (entry.reg == null) {
+                var it = store.unused.iterator();
+                const reg = it.next() orelse return error.OutOfRegisters; // TODO: stack spilling
+                store.unused.remove(reg);
+                entry.reg = reg;
+            }
+            regs.getPtr(blk.start, insn_ref).* = entry.reg.?;
+
+            // TODO: use black-hole register (if available) for discarding results
+            if (dies_immediately) {
+                store.release(vreg);
+            }
+        }
+
+        switch (blk.term) {
+            .ret => |ret| store.releaseTemp(blk.start, ret),
+            .jump => |j| {
+                var i: usize = 0;
+                while (j.args[i] != .invalid) : (i += 1) {
+                    store.releaseTemp(blk.start, j.args[i]);
+                }
+            },
+            .branch => |br| {
+                var i: usize = 0;
+                while (br.args[i] != .invalid) : (i += 1) {
+                    store.releaseTemp(blk.start, br.args[i]);
+                }
+                i += 1;
+                while (br.args[i] != .invalid) : (i += 1) {
+                    store.releaseTemp(blk.start, br.args[i]);
+                }
+            },
         }
     }
 

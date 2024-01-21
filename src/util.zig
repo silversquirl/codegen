@@ -74,6 +74,10 @@ pub fn IndexedStore(comptime IndexEnum: type, comptime ValueType: type) type {
                 try store.items.resize(allocator, n);
             }
 
+            pub fn growAndFill(store: *Self.Mutable, allocator: std.mem.Allocator, n: u32, item: Value) !void {
+                try store.items.appendNTimes(allocator, item, n - store.count());
+            }
+
             pub fn toConst(store: *Self.Mutable, allocator: std.mem.Allocator) !Self {
                 return .{ .items = try store.items.toOwnedSlice(allocator) };
             }

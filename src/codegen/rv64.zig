@@ -15,7 +15,7 @@ pub fn compile(
     const vregs = try regalloc.virtualAlloc(allocator, func, liveness);
     defer vregs.deinit(allocator);
 
-    const regs = try regalloc.physicalAlloc(rv64.Register, rv64.mutable_regs, allocator, func, vregs);
+    const regs = try regalloc.physicalAlloc(rv64.Register, rv64.mutable_regs, allocator, func, liveness, vregs);
     defer regs.deinit(allocator);
 
     for (func.blocks.items) |blk| {
