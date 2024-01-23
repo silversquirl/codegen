@@ -1,5 +1,4 @@
 //! RV64G code generation
-// TODO: register allocation
 const std = @import("std");
 const rv64 = @import("asm").rv64;
 const ssa = @import("ssa");
